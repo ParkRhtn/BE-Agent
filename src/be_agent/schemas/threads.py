@@ -37,3 +37,4 @@ class UIMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     parts: list[dict[str, Any]]
+    metadata: dict[str, Any] | None = None  # 답변: {runId, feedback}

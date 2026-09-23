@@ -1,6 +1,8 @@
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -9,9 +11,10 @@ from langchain_core.tools import BaseTool
 from sqlalchemy import select
 
 from be_agent.agent.service import AgentService, AgentSpec
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep
+from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, TracingDep
 from be_agent.core.model_registry import ModelNotAvailable, ModelRegistry
-from be_agent.db.models import Agent, User, Workflow
+from be_agent.core.observability import SpanHandle, SpanKind, Tracing
+from be_agent.db.models import Agent, Run, User, Workflow
 from be_agent.schemas.workflows import (
     NodePosition,
     WorkflowCreate,
@@ -22,9 +25,13 @@ from be_agent.schemas.workflows import (
     WorkflowRunRequest,
     WorkflowUpdate,
 )
+from be_agent.streaming.background import stream_in_task
 from be_agent.workflow.engine import ValidationContext, WorkflowExecutor, validate_graph
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+# 노드 종류 → Langfuse 기록 종류
+_NODE_SPAN_KIND: dict[str, SpanKind] = {"agent": "agent", "tool": "tool"}
 
 
 def _default_graph() -> WorkflowGraph:
@@ -88,10 +95,17 @@ async def delete_workflow(workflow_id: str, session: SessionDep, user: CurrentUs
 class _ServiceRuntime:
     """AgentService 를 워크플로우 엔진의 Runtime 으로 감싼다."""
 
-    def __init__(self, service: AgentService, registry: ModelRegistry) -> None:
+    def __init__(self, service: AgentService, registry: ModelRegistry, tracing: Tracing) -> None:
         self._service = service
         self._registry = registry
+        self._tracing = tracing
         self._run_id = uuid.uuid4().hex
+        self.callbacks: list[Any] = tracing.callbacks
+
+    @contextmanager
+    def trace_node(self, node_id: str, kind: str, input: Any) -> Iterator[SpanHandle]:
+        with self._tracing.span(f"{node_id} ({kind})", kind=_NODE_SPAN_KIND.get(kind, "span"), input=input) as span:
+            yield span
 
     def create_model(self, model_id: str | None) -> BaseChatModel:
         return self._service.create_model(self._registry.resolve(model_id))
@@ -100,7 +114,9 @@ class _ServiceRuntime:
         return self._service.get_tool(name)
 
     async def run_agent(self, spec: AgentSpec, message: str) -> str:
-        return await self._service.run_once(spec=spec, message=message, run_id=f"{self._run_id}-{uuid.uuid4().hex}")
+        return await self._service.run_once(
+            spec=spec, message=message, run_id=f"{self._run_id}-{uuid.uuid4().hex}", run_name="에이전트"
+        )
 
 
 @router.post(
@@ -117,6 +133,7 @@ async def run_workflow(
     session: SessionDep,
     registry: ModelRegistryDep,
     service: AgentServiceDep,
+    tracing: TracingDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
     workflow = await _get_workflow_or_404(session, workflow_id, user)
@@ -138,10 +155,33 @@ async def run_workflow(
     if errors := validate_graph(graph, ctx):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, errors)
 
-    executor = WorkflowExecutor(graph, _ServiceRuntime(service, registry), agents)
+    executor = WorkflowExecutor(graph, _ServiceRuntime(service, registry, tracing), agents)
+    run_id = uuid.uuid4().hex
+    run = Run(
+        id=run_id, user_id=user.id, kind="workflow", workflow_id=workflow.id, trace_id=Tracing.trace_id_for(run_id)
+    )
+    session.add(run)
+    await session.commit()
+    trace_name = f"워크플로우: {workflow.name}"
+    user_id, workflow_id, trace_id = user.id, workflow.id, run.trace_id
 
-    async def events() -> AsyncIterator[str]:
-        async for event in executor.run(body.input):
-            yield f"data: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
+    async def traced() -> AsyncIterator[str]:
+        # 실행 한 번 = Langfuse 기록 하나. 노드마다 하위 기록이 붙는다.
+        with tracing.trace(
+            trace_name,
+            user_id=user_id,
+            session_id=f"workflow-{workflow_id}",
+            tags=["workflow"],
+            input=body.input,
+            trace_id=trace_id,
+        ) as root:
+            async for event in executor.run(body.input, run_id=run_id):
+                if event.type == "run_finish":
+                    root.finish(output=event.output)
+                elif event.type == "node_error":
+                    root.finish(error=f"{event.node_id}: {event.error}")
+                yield f"data: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingResponse(
+        stream_in_task(traced), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+    )

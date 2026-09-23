@@ -87,6 +87,17 @@ FE 의 **설정** 화면에서 Anthropic · OpenAI · OpenAI 호환 서버(Ollam
 - 에이전트 노드는 대화 이력을 남기지 않고 한 번 실행한다
 - 실행 이벤트: `run_start` · `node_start` · `node_delta`(LLM 스트리밍) · `node_finish` · `node_skip` · `node_error` · `run_finish`
 
+## 추적 (Langfuse)
+
+`.env` 에 `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (필요하면 `LANGFUSE_HOST`) 를 넣으면 켜진다. 없으면 아무것도 보내지 않는다.
+
+- 대화: 대화 한 번이 트레이스 하나. 사용자 ID, 세션 = 대화 ID, 태그 `chat` · `agent:<이름>`
+- 워크플로우: 실행 한 번이 트레이스 하나 (`워크플로우: <이름>`). 세션 = `workflow-<ID>` 라 같은 워크플로우의 실행이 모인다.
+  노드마다 하위 기록(`<노드ID> (<종류>)`)이 생기고, 그 안의 모델 호출(토큰·비용)·도구 호출·에이전트 실행이 붙는다.
+  실패한 노드와 실행은 ERROR 로 표시된다
+- 사용자는 이메일이 아니라 내부 ID 로 보낸다
+- 구현: `core/observability.py`. 테스트(`tests/test_tracing.py`)는 기록을 메모리로 받아 구조를 검사한다
+
 ## 인증
 
 `auth` 를 제외한 모든 API 는 `Authorization: Bearer <JWT>` 가 필요하고, 스레드·에이전트는 사용자별로 분리된다.

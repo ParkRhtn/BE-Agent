@@ -10,11 +10,13 @@
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
 from be_agent.agent.service import AgentSpec
@@ -125,8 +127,19 @@ def validate_graph(graph: WorkflowGraph, ctx: ValidationContext) -> list[str]:
 # 실행
 
 
+class NodeTrace(Protocol):
+    def finish(self, *, output: Any = None, error: str | None = None) -> None: ...
+
+
 class Runtime(Protocol):
     """엔진이 바깥 세계와 만나는 지점. 테스트에서 바꿔 끼울 수 있다."""
+
+    # 모델·도구 호출에 넘길 LangChain 콜백 (추적용). 없으면 빈 목록.
+    callbacks: list[Any]
+
+    def trace_node(self, node_id: str, kind: str, input: Any) -> AbstractContextManager[NodeTrace]:
+        """노드 하나의 추적 기록. 안에서 일어난 모델·도구 호출이 이 기록 아래에 붙는다."""
+        ...
 
     def create_model(self, model_id: str | None) -> BaseChatModel:
         """None 이면 기본 모델."""
@@ -146,6 +159,7 @@ class RunEvent:
     delta: str | None = None
     output: str | None = None
     error: str | None = None
+    run_id: str | None = None  # run_start 에만: 평가를 남길 때 쓰는 실행 ID
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -173,6 +187,13 @@ def evaluate_condition(operator: str, left: str, right: str) -> bool:
         case "not_empty":
             return bool(left.strip())
     raise ValueError(f"알 수 없는 조건: {operator}")
+
+
+def _trace_input(node: WorkflowNode, state: _RunState) -> Any:
+    """추적 기록에 남길 노드 입력: 변수를 채운 설정값."""
+    if node.type == "start":
+        return state.variables["input"]
+    return {k: render(v, state.variables) if isinstance(v, str) else v for k, v in node.data.items()}
 
 
 class WorkflowExecutor:
@@ -209,9 +230,9 @@ class WorkflowExecutor:
                 return self._active_input(source, state)
         return ""
 
-    async def run(self, user_input: str) -> AsyncIterator[RunEvent]:
+    async def run(self, user_input: str, *, run_id: str | None = None) -> AsyncIterator[RunEvent]:
         state = _RunState(variables={"input": user_input})
-        yield RunEvent(type="run_start")
+        yield RunEvent(type="run_start", run_id=run_id)
 
         for node in self._order:
             if not self._is_active(node, state):
@@ -220,20 +241,27 @@ class WorkflowExecutor:
 
             yield RunEvent(type="node_start", node_id=node.id)
             deltas: list[str] = []
-            try:
-                async for delta in self._execute(node, state):
-                    deltas.append(delta)
-                    yield RunEvent(type="node_delta", node_id=node.id, delta=delta)
-                output = state.executed[node.id] if node.id in state.executed else "".join(deltas)
-            except Exception as exc:  # 노드 하나가 실패하면 실행을 멈춘다
-                yield RunEvent(type="node_error", node_id=node.id, error=f"{type(exc).__name__}: {exc}")
-                return
+            with self._runtime.trace_node(node.id, node.type, _trace_input(node, state)) as trace:
+                try:
+                    async for delta in self._execute(node, state):
+                        deltas.append(delta)
+                        yield RunEvent(type="node_delta", node_id=node.id, delta=delta)
+                    output = state.executed[node.id] if node.id in state.executed else "".join(deltas)
+                except Exception as exc:  # 노드 하나가 실패하면 실행을 멈춘다
+                    error = f"{type(exc).__name__}: {exc}"
+                    trace.finish(error=error)
+                    yield RunEvent(type="node_error", node_id=node.id, error=error)
+                    return
+                trace.finish(output=output)
 
             state.executed[node.id] = output
             state.variables[node.id] = output
             yield RunEvent(type="node_finish", node_id=node.id, output=output)
 
         yield RunEvent(type="run_finish", output=state.final_output)
+
+    def _call_config(self, node: WorkflowNode) -> RunnableConfig:
+        return RunnableConfig(callbacks=self._runtime.callbacks, run_name=node.id)
 
     async def _execute(self, node: WorkflowNode, state: _RunState) -> AsyncIterator[str]:
         """스트리밍할 텍스트 조각을 내보낸다. 조각 없이 끝나는 노드는 state.executed 에 직접 출력을 넣는다."""
@@ -247,7 +275,7 @@ class WorkflowExecutor:
                 if system := render(_text(node, "system"), v).strip():
                     messages.append(SystemMessage(content=system))
                 messages.append(HumanMessage(content=render(_text(node, "prompt"), v)))
-                async for chunk in model.astream(messages):
+                async for chunk in model.astream(messages, config=self._call_config(node)):
                     if chunk.text:
                         yield chunk.text
             case "agent":
@@ -260,7 +288,7 @@ class WorkflowExecutor:
                     raise ValueError(f"도구를 찾을 수 없습니다: {_text(node, 'tool')}")
                 args = json.loads(_text(node, "args", "{}").strip() or "{}")
                 rendered = {k: render(val, v) if isinstance(val, str) else val for k, val in args.items()}
-                result = await tool.ainvoke(rendered)
+                result = await tool.ainvoke(rendered, config=self._call_config(node))
                 state.executed[node.id] = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
             case "condition":
                 left = render(_text(node, "left", "{{input}}"), v)

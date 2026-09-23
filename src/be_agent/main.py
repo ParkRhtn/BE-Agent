@@ -2,6 +2,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from be_agent.agent.service import AgentService
 from be_agent.api.v1.router import api_router
 from be_agent.core.config import Settings, get_settings
-from be_agent.core.observability import create_callbacks
+from be_agent.core.observability import create_tracing
 from be_agent.db.session import create_engine, create_sessionmaker, init_db
 from be_agent.tools import BASIC_TOOLS, load_mcp_tools
 
@@ -31,7 +32,7 @@ async def _open_checkpointer(stack: AsyncExitStack, settings: Settings) -> BaseC
     return saver
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, trace_exporter: Any = None) -> FastAPI:
     settings = settings or get_settings()
 
     @asynccontextmanager
@@ -41,16 +42,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with AsyncExitStack() as stack:
             checkpointer = await _open_checkpointer(stack, settings)
             tools = [*BASIC_TOOLS, *await load_mcp_tools(settings.mcp_config_path)]
+            tracing = create_tracing(settings, span_exporter=trace_exporter)
+            app.state.tracing = tracing
             app.state.settings = settings
             app.state.sessionmaker = create_sessionmaker(engine)
             app.state.agent_service = AgentService(
                 checkpointer=checkpointer,
                 tools=tools,
                 system_prompt=settings.system_prompt,
-                callbacks=create_callbacks(settings),
+                callbacks=tracing.callbacks,
             )
             logger.info("Started with default model %s and tools %s", settings.default_model, [t.name for t in tools])
             yield
+            tracing.shutdown()
         await engine.dispose()
 
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

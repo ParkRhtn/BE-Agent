@@ -61,15 +61,31 @@ class AgentService:
             )
         return self._agents[spec]
 
-    def _config(self, thread_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": thread_id}, "callbacks": self._callbacks}
+    def _config(
+        self, thread_id: str, *, run_name: str | None = None, metadata: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}, "callbacks": self._callbacks}
+        if run_name:
+            config["run_name"] = run_name
+        if metadata:
+            config["metadata"] = metadata
+        return config
 
-    async def stream(self, *, thread_id: str, message: str, spec: AgentSpec) -> AsyncIterator[AgentEvent]:
+    async def stream(
+        self,
+        *,
+        thread_id: str,
+        message: str,
+        spec: AgentSpec,
+        run_name: str | None = None,
+        trace_metadata: dict[str, Any] | None = None,
+        message_id: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         try:
             agent = self._get_agent(spec)
             stream = agent.astream(
-                {"messages": [HumanMessage(content=message)]},
-                self._config(thread_id),  # type: ignore[arg-type]
+                {"messages": [HumanMessage(content=message, id=message_id)]},
+                self._config(thread_id, run_name=run_name, metadata=trace_metadata),  # type: ignore[arg-type]
                 stream_mode=["messages", "updates"],
             )
             async for event in to_agent_events(stream):
@@ -84,13 +100,13 @@ class AgentService:
     def get_tool(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    async def run_once(self, *, spec: AgentSpec, message: str, run_id: str) -> str:
+    async def run_once(self, *, spec: AgentSpec, message: str, run_id: str, run_name: str | None = None) -> str:
         """대화 이력을 남기지 않고 에이전트를 한 번 실행해 최종 답변만 돌려준다 (워크플로우용)."""
         thread_id = f"workflow-run-{run_id}"
         try:
             result = await self._get_agent(spec).ainvoke(
                 {"messages": [HumanMessage(content=message)]},
-                self._config(thread_id),  # type: ignore[arg-type]
+                self._config(thread_id, run_name=run_name),  # type: ignore[arg-type]
             )
             return result["messages"][-1].text
         finally:

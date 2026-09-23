@@ -1,13 +1,18 @@
+import uuid
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from be_agent.agent.service import AgentSpec
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, ensure_model
+from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, TracingDep, ensure_model
 from be_agent.core.model_registry import ModelNotAvailable
-from be_agent.db.models import Agent, Thread, User
+from be_agent.core.observability import Tracing
+from be_agent.db.models import Agent, Run, Thread, User
 from be_agent.schemas.threads import ChatRequest, ThreadCreate, ThreadRead, ThreadUpdate, UIMessage
-from be_agent.streaming.ai_sdk import AI_SDK_HEADERS, encode_ai_sdk_stream, to_ui_messages
+from be_agent.streaming.ai_sdk import AI_SDK_HEADERS, encode_ai_sdk_stream, run_message_ids, to_ui_messages
+from be_agent.streaming.background import stream_in_task
 
 router = APIRouter(prefix="/threads", tags=["threads"])
 
@@ -70,7 +75,16 @@ async def list_messages(
     thread_id: str, session: SessionDep, agent: AgentServiceDep, user: CurrentUserDep
 ) -> list[dict]:
     await _get_thread_or_404(session, thread_id, user)
-    return to_ui_messages(await agent.get_messages(thread_id))
+    messages = to_ui_messages(await agent.get_messages(thread_id))
+    # 답변마다 남긴 평가를 붙인다 (새로고침해도 누른 버튼이 보이게)
+    feedback = dict(
+        (await session.execute(select(Run.id, Run.feedback).where(Run.thread_id == thread_id))).tuples().all()
+    )
+    for message in messages:
+        run_id = (message.get("metadata") or {}).get("runId")
+        if run_id and (value := feedback.get(run_id)) is not None:
+            message["metadata"]["feedback"] = value
+    return messages
 
 
 @router.post(
@@ -84,6 +98,7 @@ async def chat(
     session: SessionDep,
     agent: AgentServiceDep,
     registry: ModelRegistryDep,
+    tracing: TracingDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
     """메시지를 보내고 에이전트 응답을 SSE 로 스트리밍한다 (Vercel AI SDK useChat 호환)."""
@@ -109,9 +124,29 @@ async def chat(
     thread.model = model_id
     await session.commit()
 
-    events = agent.stream(thread_id=thread_id, message=body.message, spec=spec)
-    return StreamingResponse(
-        encode_ai_sdk_stream(events),
-        media_type="text/event-stream",
-        headers=AI_SDK_HEADERS,
-    )
+    run_id = uuid.uuid4().hex
+    run = Run(id=run_id, user_id=user.id, kind="chat", thread_id=thread_id, trace_id=Tracing.trace_id_for(run_id))
+    session.add(run)
+    await session.commit()
+
+    user_message_id, answer_message_id = run_message_ids(run_id)
+    name = f"대화: {agent_def.name}" if agent_def else "대화"
+    tags = ["chat", *([f"agent:{agent_def.name}"] if agent_def else [])]
+    user_id, trace_id = user.id, run.trace_id
+
+    async def traced() -> AsyncIterator[str]:
+        # 대화 한 번 = Langfuse 기록 하나. 모델·도구 호출은 이 기록 아래에 붙는다.
+        with tracing.trace(
+            name, user_id=user_id, session_id=thread_id, tags=tags, input=body.message, trace_id=trace_id
+        ):
+            events = agent.stream(
+                thread_id=thread_id,
+                message=body.message,
+                spec=spec,
+                run_name="에이전트",
+                message_id=user_message_id,
+            )
+            async for chunk in encode_ai_sdk_stream(events, message_id=answer_message_id, metadata={"runId": run_id}):
+                yield chunk
+
+    return StreamingResponse(stream_in_task(traced), media_type="text/event-stream", headers=AI_SDK_HEADERS)

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from be_agent.agent.service import AgentService
 from be_agent.core.config import Settings
 from be_agent.core.model_registry import ModelRegistry, load_registry
+from be_agent.core.observability import Tracing
 from be_agent.core.security import as_utc, decode_access_token
 from be_agent.db.models import User
 
@@ -23,6 +24,10 @@ def get_agent_service(request: Request) -> AgentService:
     return request.app.state.agent_service
 
 
+def get_tracing(request: Request) -> Tracing:
+    return request.app.state.tracing
+
+
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -30,6 +35,7 @@ def get_app_settings(request: Request) -> Settings:
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+TracingDep = Annotated[Tracing, Depends(get_tracing)]
 
 
 async def get_current_user(

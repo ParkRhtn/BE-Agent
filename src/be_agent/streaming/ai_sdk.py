@@ -32,7 +32,19 @@ def _sse(payload: dict[str, Any] | str) -> str:
     return f"data: {data}\n\n"
 
 
-async def encode_ai_sdk_stream(events: AsyncIterator[AgentEvent]) -> AsyncIterator[str]:
+# 사용자 메시지 ID 에 실행 ID 를 심어, 이력을 다시 불러와도 답변 ID·실행 ID 가 스트리밍 때와 같게 한다
+USER_MESSAGE_PREFIX = "user-"
+ASSISTANT_MESSAGE_PREFIX = "msg-"
+
+
+def run_message_ids(run_id: str) -> tuple[str, str]:
+    """(사용자 메시지 ID, 답변 메시지 ID)"""
+    return f"{USER_MESSAGE_PREFIX}{run_id}", f"{ASSISTANT_MESSAGE_PREFIX}{run_id}"
+
+
+async def encode_ai_sdk_stream(
+    events: AsyncIterator[AgentEvent], *, message_id: str | None = None, metadata: dict[str, Any] | None = None
+) -> AsyncIterator[str]:
     """내부 이벤트를 AI SDK SSE 청크로 변환한다. 한 번의 실행 = 하나의 assistant UIMessage."""
     open_text_id: str | None = None
     step_open = False
@@ -61,7 +73,10 @@ async def encode_ai_sdk_stream(events: AsyncIterator[AgentEvent]) -> AsyncIterat
         after_tool_results = False
         return out
 
-    yield _sse({"type": "start", "messageId": f"msg-{uuid.uuid4()}"})
+    start: dict[str, Any] = {"type": "start", "messageId": message_id or f"msg-{uuid.uuid4()}"}
+    if metadata:
+        start["messageMetadata"] = metadata
+    yield _sse(start)
 
     async for event in events:
         match event:
@@ -120,9 +135,15 @@ def to_ui_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     assistant: dict[str, Any] | None = None
     tool_parts: dict[str, dict[str, Any]] = {}
 
+    run_id: str | None = None  # 직전 사용자 메시지에 심어 둔 실행 ID
     for message in messages:
         if isinstance(message, HumanMessage):
             assistant = None
+            run_id = (
+                message.id.removeprefix(USER_MESSAGE_PREFIX)
+                if message.id and message.id.startswith(USER_MESSAGE_PREFIX)
+                else None
+            )
             ui_messages.append(
                 {
                     "id": message.id or f"msg-{uuid.uuid4()}",
@@ -132,7 +153,15 @@ def to_ui_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
             )
         elif isinstance(message, AIMessage):
             if assistant is None:
-                assistant = {"id": message.id or f"msg-{uuid.uuid4()}", "role": "assistant", "parts": []}
+                if run_id:
+                    assistant = {
+                        "id": run_message_ids(run_id)[1],
+                        "role": "assistant",
+                        "parts": [],
+                        "metadata": {"runId": run_id},
+                    }
+                else:  # 실행 ID 를 쓰기 전의 옛 대화
+                    assistant = {"id": message.id or f"msg-{uuid.uuid4()}", "role": "assistant", "parts": []}
                 ui_messages.append(assistant)
             parts = assistant["parts"]
             parts.append({"type": "step-start"})

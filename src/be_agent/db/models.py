@@ -116,3 +116,19 @@ class ModelProvider(Base):
     verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
+
+
+class Run(Base):
+    """실행 한 번 (채팅 답변 한 번 또는 워크플로우 실행 한 번). 평가와 Langfuse 기록을 잇는다."""
+
+    __tablename__ = "runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # chat | workflow
+    thread_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    trace_id: Mapped[str] = mapped_column(String(32))
+    feedback: Mapped[int | None] = mapped_column()  # 1 = 좋아요, -1 = 별로
+    feedback_comment: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"  # noqa: S105
@@ -54,7 +54,8 @@ class Settings(BaseSettings):
 
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
-    langfuse_host: str | None = None
+    # Langfuse 문서의 이름(LANGFUSE_BASE_URL)과 예전 이름(LANGFUSE_HOST) 모두 받는다
+    langfuse_host: str | None = Field(default=None, validation_alias=AliasChoices("langfuse_base_url", "langfuse_host"))
 
     @model_validator(mode="after")
     def _require_jwt_secret(self) -> "Settings":
