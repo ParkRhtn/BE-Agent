@@ -68,3 +68,14 @@ def test_unknown_tool_example_args_fill_required_with_input() -> None:
 
     assert display_for("mystery", "원래 설명").label == "mystery"
     assert example_args("mystery", {"required": ["q", "lang"]}) == '{"q": "{{input}}", "lang": "{{input}}"}'
+
+
+def test_mcp_config_expands_env_vars(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from be_agent.tools.mcp import _read_connections
+
+    monkeypatch.setenv("DEMO_KEY", "secret-123")
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"s": {"url": "https://x/?k=${DEMO_KEY}", "args": ["${MISSING}"]}}}))
+    assert _read_connections(config) == {"s": {"url": "https://x/?k=secret-123", "args": [""]}}

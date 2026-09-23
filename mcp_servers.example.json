@@ -1,13 +1,13 @@
 {
   "mcpServers": {
+    "tavily": {
+      "transport": "streamable_http",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
+    },
     "filesystem": {
       "transport": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
-    },
-    "remote-example": {
-      "transport": "streamable_http",
-      "url": "http://localhost:9000/mcp"
     }
   }
 }

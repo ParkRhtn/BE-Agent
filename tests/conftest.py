@@ -17,6 +17,7 @@ def settings(tmp_path: Path) -> Settings:
         database_url=f"sqlite+aiosqlite:///{tmp_path}/app.db",
         checkpoint_sqlite_path=str(tmp_path / "checkpoints.db"),
         default_model="fake:echo",
+        mcp_config_path=None,  # 테스트에서 외부 MCP 서버를 띄우지 않는다
     )
 
 

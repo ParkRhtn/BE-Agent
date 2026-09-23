@@ -9,4 +9,3 @@ wheels/
 data/
 .pytest_cache/
 .ruff_cache/
-mcp_servers.json

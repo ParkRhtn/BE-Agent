@@ -29,7 +29,8 @@ class Settings(BaseSettings):
     ]
     system_prompt: str = "You are a helpful assistant. Answer in the user's language."
 
-    mcp_config_path: Path | None = None
+    # MCP 도구 서버 설정 (git 에 올린다). 키는 파일 안에 ${이름} 으로 쓰고 .env 에 둔다. 끄려면 빈 값.
+    mcp_config_path: Path | None = Path("mcp_servers.json")
 
     # 설정 화면에서 제공사를 등록하지 않았을 때 쓰는 키 (.env). 화면에서 등록한 키가 우선이다.
     anthropic_api_key: str | None = None

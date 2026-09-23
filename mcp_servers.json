@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "duckduckgo": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["duckduckgo-mcp-server"],
+      "env": { "DDG_REGION": "kr-kr" }
+    }
+  }
+}

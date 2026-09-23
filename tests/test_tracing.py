@@ -31,6 +31,7 @@ def traced_client(tmp_path: Path, exporter: InMemorySpanExporter) -> Iterator[Te
         langfuse_public_key=f"pk-test-{uuid.uuid4().hex}",
         langfuse_secret_key="sk-test",
         langfuse_host="http://127.0.0.1:9",
+        mcp_config_path=None,
     )
     with TestClient(create_app(settings, trace_exporter=exporter)) as client:
         login_as(client, "traced@example.com")
