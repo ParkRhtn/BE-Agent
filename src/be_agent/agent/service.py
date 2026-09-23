@@ -12,7 +12,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from be_agent.agent.stream import to_agent_events
-from be_agent.core.llm import create_chat_model
+from be_agent.core.llm import ModelConfig, create_chat_model
 from be_agent.streaming.events import AgentEvent, RunError
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class AgentSpec:
     """에이전트 그래프를 결정하는 설정. 같은 설정이면 컴파일된 그래프를 재사용한다."""
 
-    model: str
+    model: ModelConfig
     system_prompt: str | None = None  # None 이면 서비스 기본 프롬프트
     tools: tuple[str, ...] | None = None  # None 이면 등록된 모든 도구
 
@@ -37,7 +37,7 @@ class AgentService:
         tools: Sequence[BaseTool],
         system_prompt: str,
         callbacks: Sequence[BaseCallbackHandler] = (),
-        model_factory: Callable[[str], BaseChatModel] = create_chat_model,
+        model_factory: Callable[[ModelConfig], BaseChatModel] = create_chat_model,
     ) -> None:
         self.checkpointer = checkpointer
         self._tools = {t.name: t for t in tools}
@@ -75,11 +75,11 @@ class AgentService:
             async for event in to_agent_events(stream):
                 yield event
         except Exception as exc:
-            logger.exception("Agent run failed (thread=%s, model=%s)", thread_id, spec.model)
+            logger.exception("Agent run failed (thread=%s, model=%s)", thread_id, spec.model.model)
             yield RunError(message=f"{type(exc).__name__}: {exc}")
 
-    def create_model(self, name: str) -> BaseChatModel:
-        return self._model_factory(name)
+    def create_model(self, config: ModelConfig) -> BaseChatModel:
+        return self._model_factory(config)
 
     def get_tool(self, name: str) -> BaseTool | None:
         return self._tools.get(name)

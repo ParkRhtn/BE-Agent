@@ -124,10 +124,20 @@ def test_validation_errors(client: TestClient) -> None:
 
 
 def test_node_error_stops_run(client: TestClient) -> None:
+    # 도구가 받지 않는 인자를 넘기면 실행 중에 실패한다
+    nodes = [node("start", "start"), node("tool_1", "tool", tool="get_current_time", args='{"timezone": 123}')]
+    nodes.append(node("end", "end"))
+    events = _run(client, _create(client, nodes, [edge("start", "tool_1"), edge("tool_1", "end")]), "x")
+    assert events[-1]["type"] == "node_error" and events[-1]["node_id"] == "tool_1"
+
+
+def test_unavailable_model_is_rejected_before_run(client: TestClient) -> None:
     nodes = [node("start", "start"), node("llm_1", "llm", prompt="x", model="anthropic:claude-sonnet-5")]
     nodes.append(node("end", "end"))
-    events = _run(client, _create(client, nodes, [edge("start", "llm_1"), edge("llm_1", "end")]), "x")
-    assert events[-1]["type"] == "node_error" and events[-1]["node_id"] == "llm_1"
+    workflow_id = _create(client, nodes, [edge("start", "llm_1"), edge("llm_1", "end")])
+    response = client.post(f"/api/v1/workflows/{workflow_id}/run", json={"input": "x"})
+    assert response.status_code == 400
+    assert "사용할 수 없는 모델" in response.json()["detail"][0]
 
 
 def test_crud_and_isolation(client: TestClient) -> None:

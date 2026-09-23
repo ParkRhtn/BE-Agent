@@ -43,6 +43,7 @@ class ValidationContext:
     tool_names: set[str]
     agent_ids: set[str]
     allowed_models: set[str]
+    has_default_model: bool = True
 
 
 def topological_order(graph: WorkflowGraph) -> list[WorkflowNode] | None:
@@ -100,7 +101,9 @@ def validate_graph(graph: WorkflowGraph, ctx: ValidationContext) -> list[str]:
                 errors.append(f"{prefix} 프롬프트를 입력하세요.")
             model = _text(node, "model")
             if model and model not in ctx.allowed_models:
-                errors.append(f"{prefix} 허용되지 않은 모델입니다: {model}")
+                errors.append(f"{prefix} 사용할 수 없는 모델입니다. 설정에서 켠 모델을 고르세요.")
+            elif not model and not ctx.has_default_model:
+                errors.append(f"{prefix} 사용할 모델이 없습니다. 설정에서 모델 제공사를 추가하세요.")
         elif node.type == "agent":
             if _text(node, "agent_id") not in ctx.agent_ids:
                 errors.append(f"{prefix} 에이전트를 선택하세요.")
@@ -125,9 +128,10 @@ def validate_graph(graph: WorkflowGraph, ctx: ValidationContext) -> list[str]:
 class Runtime(Protocol):
     """엔진이 바깥 세계와 만나는 지점. 테스트에서 바꿔 끼울 수 있다."""
 
-    default_model: str
+    def create_model(self, model_id: str | None) -> BaseChatModel:
+        """None 이면 기본 모델."""
+        ...
 
-    def create_model(self, name: str) -> BaseChatModel: ...
     def get_tool(self, name: str) -> BaseTool | None: ...
     def run_agent(self, spec: AgentSpec, message: str) -> Awaitable[str]: ...
 
@@ -238,7 +242,7 @@ class WorkflowExecutor:
             case "start":
                 state.executed[node.id] = v["input"]
             case "llm":
-                model = self._runtime.create_model(_text(node, "model") or self._runtime.default_model)
+                model = self._runtime.create_model(_text(node, "model") or None)
                 messages: list[Any] = []
                 if system := render(_text(node, "system"), v).strip():
                     messages.append(SystemMessage(content=system))

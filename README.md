@@ -61,7 +61,21 @@ src/be_agent/
 | GET/PATCH/DELETE | `/api/v1/workflows/{id}` | 워크플로우 조회 / 저장 (미완성도 저장 가능) / 삭제 |
 | POST | `/api/v1/workflows/{id}/run` | 검증 후 실행, 노드별 이벤트를 SSE 로 스트리밍 |
 | GET | `/api/v1/tools` | 에이전트에 붙일 수 있는 도구 목록 (기본 + MCP) |
-| GET | `/api/v1/models` | 기본 모델 / 허용 모델 목록 |
+| GET | `/api/v1/models` | 이 사용자가 쓸 수 있는 모델 목록 / 기본 모델 |
+| PUT | `/api/v1/models/default` | 기본 모델 변경 |
+| GET/POST | `/api/v1/providers` | 모델 제공사 목록 / 추가 (실제 API 로 키 확인 후 저장) |
+| PATCH/DELETE | `/api/v1/providers/{id}` | 이름·키·주소 변경 (다시 확인), 쓸 모델 켜기/끄기 / 삭제 |
+| POST | `/api/v1/providers/{id}/verify` | 저장된 키로 다시 확인, 모델 목록 갱신 |
+| POST | `/api/v1/providers/{id}/test` | 모델에 짧은 요청을 실제로 보내 응답 확인 (토큰 몇 개 비용) |
+
+## 모델 설정
+
+FE 의 **설정** 화면에서 Anthropic · OpenAI · OpenAI 호환 서버(Ollama 등)를 연결한다.
+
+- 키는 저장 전에 제공사의 모델 목록 API 로 확인하고, 통과한 키만 암호화(Fernet)해 저장한다. 화면에는 끝 4자리만 보인다
+- 확인 때 받은 모델 중 켠 모델만 대화·에이전트·워크플로우의 모델 목록에 나온다. 모델 ID 는 `<제공사ID>:<모델>`
+- 설정 화면에서 등록한 모델이 없으면 `.env` 의 `ALLOWED_MODELS` 중 키가 있는 것(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)을 대신 쓴다. `fake:echo` 는 `ENVIRONMENT=local` 에서만
+- 암호화 키는 `ENCRYPTION_KEY`, 없으면 `JWT_SECRET` 에서 만든다. 이 값을 바꾸면 저장된 키를 다시 입력해야 한다
 
 ## 워크플로우
 

@@ -31,6 +31,12 @@ class Settings(BaseSettings):
 
     mcp_config_path: Path | None = None
 
+    # 설정 화면에서 제공사를 등록하지 않았을 때 쓰는 키 (.env). 화면에서 등록한 키가 우선이다.
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    # 제공사 API 키 암호화용. 없으면 JWT_SECRET 에서 만든다 (그 경우 JWT_SECRET 을 바꾸면 저장된 키를 못 읽는다).
+    encryption_key: str | None = None
+
     # 인증. 운영에서는 반드시 `openssl rand -hex 32` 등으로 만든 값으로 바꾼다.
     jwt_secret: str = _DEV_JWT_SECRET
     jwt_expire_minutes: int = 60 * 24 * 7
@@ -57,6 +63,10 @@ class Settings(BaseSettings):
         if self.environment != "local" and self.jwt_secret == _DEV_JWT_SECRET:
             raise ValueError("local 이 아닌 환경에서는 JWT_SECRET 을 반드시 설정해야 합니다.")
         return self
+
+    @property
+    def secret_box_key(self) -> str:
+        return self.encryption_key or self.jwt_secret
 
     @property
     def is_sqlite(self) -> bool:

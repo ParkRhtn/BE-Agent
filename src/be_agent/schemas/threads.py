@@ -37,8 +37,3 @@ class UIMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     parts: list[dict[str, Any]]
-
-
-class ModelsRead(BaseModel):
-    default: str
-    allowed: list[str]

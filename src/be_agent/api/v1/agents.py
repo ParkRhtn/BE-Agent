@@ -2,8 +2,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select, update
 
 from be_agent.agent.service import AgentService
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, SessionDep, SettingsDep
-from be_agent.api.v1.threads import validate_model
+from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, ensure_model
 from be_agent.db.models import Agent, Thread, User
 from be_agent.schemas.agents import AgentCreate, AgentRead, AgentUpdate
 
@@ -31,9 +30,9 @@ async def list_agents(session: SessionDep, user: CurrentUserDep) -> list[Agent]:
 
 @router.post("", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
 async def create_agent(
-    body: AgentCreate, session: SessionDep, settings: SettingsDep, service: AgentServiceDep, user: CurrentUserDep
+    body: AgentCreate, session: SessionDep, registry: ModelRegistryDep, service: AgentServiceDep, user: CurrentUserDep
 ) -> Agent:
-    validate_model(settings, body.model)
+    ensure_model(registry, body.model)
     _validate_tools(service, body.tools)
     agent = Agent(**body.model_dump(), user_id=user.id)
     session.add(agent)
@@ -51,12 +50,12 @@ async def update_agent(
     agent_id: str,
     body: AgentUpdate,
     session: SessionDep,
-    settings: SettingsDep,
+    registry: ModelRegistryDep,
     service: AgentServiceDep,
     user: CurrentUserDep,
 ) -> Agent:
     agent = await _get_agent_or_404(session, agent_id, user)
-    validate_model(settings, body.model)
+    ensure_model(registry, body.model)
     _validate_tools(service, body.tools)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(agent, field, value)

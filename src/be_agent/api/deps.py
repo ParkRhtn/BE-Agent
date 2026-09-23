@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from be_agent.agent.service import AgentService
 from be_agent.core.config import Settings
+from be_agent.core.model_registry import ModelRegistry, load_registry
 from be_agent.core.security import as_utc, decode_access_token
 from be_agent.db.models import User
 
@@ -49,3 +50,16 @@ async def get_current_user(
 
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
+
+
+async def get_model_registry(session: SessionDep, settings: SettingsDep, user: CurrentUserDep) -> ModelRegistry:
+    return await load_registry(session, user, settings)
+
+
+ModelRegistryDep = Annotated[ModelRegistry, Depends(get_model_registry)]
+
+
+def ensure_model(registry: ModelRegistry, model: str | None) -> None:
+    """요청에 모델이 지정됐다면 이 사용자가 쓸 수 있는 모델인지 확인한다."""
+    if model is not None and model not in registry.configs:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"사용할 수 없는 모델입니다: {model}")

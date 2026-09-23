@@ -3,18 +3,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from be_agent.agent.service import AgentSpec
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, SessionDep, SettingsDep
-from be_agent.core.config import Settings
+from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, ensure_model
+from be_agent.core.model_registry import ModelNotAvailable
 from be_agent.db.models import Agent, Thread, User
 from be_agent.schemas.threads import ChatRequest, ThreadCreate, ThreadRead, ThreadUpdate, UIMessage
 from be_agent.streaming.ai_sdk import AI_SDK_HEADERS, encode_ai_sdk_stream, to_ui_messages
 
 router = APIRouter(prefix="/threads", tags=["threads"])
-
-
-def validate_model(settings: Settings, model: str | None) -> None:
-    if model is not None and model not in settings.allowed_models:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"허용되지 않은 모델입니다: {model}")
 
 
 async def _get_thread_or_404(session: SessionDep, thread_id: str, user: User) -> Thread:
@@ -31,8 +26,10 @@ async def list_threads(session: SessionDep, user: CurrentUserDep) -> list[Thread
 
 
 @router.post("", response_model=ThreadRead, status_code=status.HTTP_201_CREATED)
-async def create_thread(body: ThreadCreate, session: SessionDep, settings: SettingsDep, user: CurrentUserDep) -> Thread:
-    validate_model(settings, body.model)
+async def create_thread(
+    body: ThreadCreate, session: SessionDep, registry: ModelRegistryDep, user: CurrentUserDep
+) -> Thread:
+    ensure_model(registry, body.model)
     if body.agent_id is not None:
         agent = await session.get(Agent, body.agent_id)
         if agent is None or agent.user_id != user.id:
@@ -50,10 +47,10 @@ async def get_thread(thread_id: str, session: SessionDep, user: CurrentUserDep) 
 
 @router.patch("/{thread_id}", response_model=ThreadRead)
 async def update_thread(
-    thread_id: str, body: ThreadUpdate, session: SessionDep, settings: SettingsDep, user: CurrentUserDep
+    thread_id: str, body: ThreadUpdate, session: SessionDep, registry: ModelRegistryDep, user: CurrentUserDep
 ) -> Thread:
     thread = await _get_thread_or_404(session, thread_id, user)
-    validate_model(settings, body.model)
+    ensure_model(registry, body.model)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(thread, field, value)
     await session.commit()
@@ -86,23 +83,30 @@ async def chat(
     body: ChatRequest,
     session: SessionDep,
     agent: AgentServiceDep,
-    settings: SettingsDep,
+    registry: ModelRegistryDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
     """메시지를 보내고 에이전트 응답을 SSE 로 스트리밍한다 (Vercel AI SDK useChat 호환)."""
     thread = await _get_thread_or_404(session, thread_id, user)
-    validate_model(settings, body.model)
+    ensure_model(registry, body.model)
     agent_def = await session.get(Agent, thread.agent_id) if thread.agent_id else None
-    model_name = body.model or thread.model or (agent_def and agent_def.model) or settings.default_model
+    try:
+        if body.model:
+            model_id, model_config = body.model, registry.resolve(body.model)
+        else:
+            # 예전에 쓰던 모델이 지금은 없으면(키 삭제 등) 기본 모델로 이어간다
+            model_id, model_config = registry.resolve_or_default(thread.model or (agent_def and agent_def.model))
+    except ModelNotAvailable as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     spec = (
-        AgentSpec(model=model_name, system_prompt=agent_def.system_prompt, tools=tuple(agent_def.tools))
+        AgentSpec(model=model_config, system_prompt=agent_def.system_prompt, tools=tuple(agent_def.tools))
         if agent_def
-        else AgentSpec(model=model_name)
+        else AgentSpec(model=model_config)
     )
 
     if thread.title is None:
         thread.title = body.message[:50]
-    thread.model = model_name
+    thread.model = model_id
     await session.commit()
 
     events = agent.stream(thread_id=thread_id, message=body.message, spec=spec)

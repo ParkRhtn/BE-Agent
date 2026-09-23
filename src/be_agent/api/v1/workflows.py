@@ -9,7 +9,8 @@ from langchain_core.tools import BaseTool
 from sqlalchemy import select
 
 from be_agent.agent.service import AgentService, AgentSpec
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, SessionDep, SettingsDep
+from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep
+from be_agent.core.model_registry import ModelNotAvailable, ModelRegistry
 from be_agent.db.models import Agent, User, Workflow
 from be_agent.schemas.workflows import (
     NodePosition,
@@ -87,13 +88,13 @@ async def delete_workflow(workflow_id: str, session: SessionDep, user: CurrentUs
 class _ServiceRuntime:
     """AgentService 를 워크플로우 엔진의 Runtime 으로 감싼다."""
 
-    def __init__(self, service: AgentService, default_model: str) -> None:
+    def __init__(self, service: AgentService, registry: ModelRegistry) -> None:
         self._service = service
+        self._registry = registry
         self._run_id = uuid.uuid4().hex
-        self.default_model = default_model
 
-    def create_model(self, name: str) -> BaseChatModel:
-        return self._service.create_model(name)
+    def create_model(self, model_id: str | None) -> BaseChatModel:
+        return self._service.create_model(self._registry.resolve(model_id))
 
     def get_tool(self, name: str) -> BaseTool | None:
         return self._service.get_tool(name)
@@ -114,26 +115,30 @@ async def run_workflow(
     workflow_id: str,
     body: WorkflowRunRequest,
     session: SessionDep,
-    settings: SettingsDep,
+    registry: ModelRegistryDep,
     service: AgentServiceDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
     workflow = await _get_workflow_or_404(session, workflow_id, user)
     graph = WorkflowGraph.model_validate(workflow.graph)
 
-    agents = {
-        a.id: AgentSpec(model=a.model or settings.default_model, system_prompt=a.system_prompt, tools=tuple(a.tools))
-        for a in await session.scalars(select(Agent).where(Agent.user_id == user.id))
-    }
+    agents: dict[str, AgentSpec] = {}
+    for a in await session.scalars(select(Agent).where(Agent.user_id == user.id)):
+        try:
+            _, config = registry.resolve_or_default(a.model)
+        except ModelNotAvailable:
+            continue  # 쓸 모델이 없는 에이전트는 검증에서 "에이전트를 선택하세요" 로 걸린다
+        agents[a.id] = AgentSpec(model=config, system_prompt=a.system_prompt, tools=tuple(a.tools))
     ctx = ValidationContext(
         tool_names={t.name for t in service.tools},
         agent_ids=set(agents),
-        allowed_models=set(settings.allowed_models),
+        allowed_models=set(registry.configs),
+        has_default_model=registry.default_id is not None,
     )
     if errors := validate_graph(graph, ctx):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, errors)
 
-    executor = WorkflowExecutor(graph, _ServiceRuntime(service, settings.default_model), agents)
+    executor = WorkflowExecutor(graph, _ServiceRuntime(service, registry), agents)
 
     async def events() -> AsyncIterator[str]:
         async for event in executor.run(body.input):

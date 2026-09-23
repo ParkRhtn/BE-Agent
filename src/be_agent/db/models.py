@@ -21,6 +21,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     # 이 시각 이전에 발급된 JWT 는 거부한다 (비밀번호 변경 시 다른 세션 로그아웃).
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    default_model: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -77,5 +78,24 @@ class Workflow(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(String(500))
     graph: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ModelProvider(Base):
+    """사용자가 등록한 모델 제공사. API 키는 암호화해 저장하고, 연결 확인 때 받은 모델 목록을 함께 둔다."""
+
+    __tablename__ = "model_providers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(30))  # anthropic | openai | openai_compatible
+    name: Mapped[str] = mapped_column(String(100))
+    base_url: Mapped[str | None] = mapped_column(String(500))
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    api_key_hint: Mapped[str | None] = mapped_column(String(20))
+    available_models: Mapped[list[dict]] = mapped_column(JSON, default=list)  # [{id, label}]
+    enabled_models: Mapped[list[str]] = mapped_column(JSON, default=list)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
