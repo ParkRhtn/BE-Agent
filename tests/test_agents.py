@@ -53,3 +53,18 @@ def test_delete_agent_detaches_threads(client: TestClient) -> None:
 
 def test_create_thread_with_unknown_agent(client: TestClient) -> None:
     assert client.post("/api/v1/threads", json={"agent_id": "missing"}).status_code == 400
+
+
+def test_tools_have_korean_display_and_example_args(client: TestClient) -> None:
+    import json
+
+    tool = next(t for t in client.get("/api/v1/tools").json() if t["name"] == "get_current_time")
+    assert tool["label"] == "현재 시각"
+    assert json.loads(tool["example_args"]) == {"timezone": "Asia/Seoul"}
+
+
+def test_unknown_tool_example_args_fill_required_with_input() -> None:
+    from be_agent.tools.catalog import display_for, example_args
+
+    assert display_for("mystery", "원래 설명").label == "mystery"
+    assert example_args("mystery", {"required": ["q", "lang"]}) == '{"q": "{{input}}", "lang": "{{input}}"}'

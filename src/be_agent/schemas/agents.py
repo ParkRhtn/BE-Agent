@@ -33,5 +33,7 @@ class AgentRead(BaseModel):
 
 
 class ToolRead(BaseModel):
-    name: str
-    description: str
+    name: str  # 에이전트·노드 설정에 저장되는 값
+    label: str  # 화면 이름 (한국어)
+    description: str  # 화면 설명 (한국어)
+    example_args: str  # 워크플로우 도구 노드 인자 예시 (JSON)
