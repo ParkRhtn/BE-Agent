@@ -1,0 +1,99 @@
+# BE-Agent
+
+LangGraph 기반 멀티 모델 에이전트 백엔드. FE(`../FE-Agent`, Next.js + Vercel AI SDK)와 SSE 로 연동한다.
+
+## 스택
+
+uv · FastAPI · LangGraph (`create_agent`) · `init_chat_model` 기반 멀티 모델 · MCP 도구 · SQLAlchemy 2.0 (async) · LangGraph 체크포인트 (SQLite / Postgres) · Langfuse
+
+## 빠른 시작
+
+```bash
+cp .env.example .env
+uv sync
+uv run be-agent            # http://localhost:8000 , 문서: /docs
+```
+
+기본 모델은 `fake:echo` 라서 API 키 없이 동작한다. "지금 몇 시야?" 라고 보내면 도구 호출 흐름까지 확인할 수 있다.
+실제 모델은 `.env` 에 API 키를 넣고 `DEFAULT_MODEL=anthropic:claude-sonnet-5` 처럼 바꾼다.
+
+## 구조
+
+```
+src/be_agent/
+├── main.py              # 앱 생성, lifespan (DB, 체크포인터, 도구 초기화)
+├── core/
+│   ├── config.py        # 환경변수 설정 (pydantic-settings)
+│   ├── llm.py           # 모델 팩토리 — 모델 생성은 반드시 여기를 거친다
+│   ├── fake_model.py    # 개발용 fake 모델
+│   └── observability.py # Langfuse 콜백
+├── agent/
+│   ├── service.py       # 모델별 에이전트 그래프 캐시, 스레드 단위 실행
+│   └── stream.py        # LangGraph 스트림 → 내부 이벤트
+├── streaming/
+│   ├── events.py        # 내부 공통 이벤트 (FE 프로토콜과 무관)
+│   └── ai_sdk.py        # 내부 이벤트 → Vercel AI SDK UI Message Stream
+├── tools/               # 기본 도구 + MCP 도구 로더
+├── api/v1/              # REST API
+├── db/                  # SQLAlchemy 모델 (스레드 메타데이터)
+└── schemas/             # 요청/응답 Pydantic 스키마
+```
+
+스레드는 `agent_id` 로 에이전트에 연결된다. 에이전트가 없으면 `.env` 의 기본 프롬프트와 모든 도구를 쓴다.
+컴파일된 그래프는 `(모델, 프롬프트, 도구)` 조합별로 캐시된다.
+
+스트림은 `LangGraph → 내부 이벤트 → 프로토콜 어댑터` 두 단계로 변환한다.
+다른 FE 프로토콜(AG-UI 등)이 필요하면 `streaming/` 에 어댑터만 추가하면 된다.
+
+## API
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | `/api/v1/auth/signup` · `/api/v1/auth/login` | 가입 / 로그인 → JWT 발급 |
+| GET | `/api/v1/auth/me` | 현재 사용자 |
+| GET/POST | `/api/v1/threads` | 스레드 목록 / 생성 |
+| GET/PATCH/DELETE | `/api/v1/threads/{id}` | 스레드 조회 / 수정 / 삭제 (체크포인트 포함) |
+| GET | `/api/v1/threads/{id}/messages` | 대화 이력 (AI SDK `UIMessage[]` 형식) |
+| POST | `/api/v1/threads/{id}/chat` | 메시지 전송, SSE 스트리밍 응답 |
+| GET/POST | `/api/v1/agents` | 에이전트 목록 / 생성 (이름·시스템 프롬프트·모델·도구) |
+| GET/PATCH/DELETE | `/api/v1/agents/{id}` | 에이전트 조회 / 수정 / 삭제 (연결된 스레드는 기본 에이전트로 전환) |
+| GET | `/api/v1/tools` | 에이전트에 붙일 수 있는 도구 목록 (기본 + MCP) |
+| GET | `/api/v1/models` | 기본 모델 / 허용 모델 목록 |
+
+## 인증
+
+`auth` 를 제외한 모든 API 는 `Authorization: Bearer <JWT>` 가 필요하고, 스레드·에이전트는 사용자별로 분리된다.
+FE 는 토큰을 httpOnly 쿠키에 두고 BFF 프록시에서 헤더로 옮긴다.
+
+- `JWT_SECRET`: `openssl rand -hex 32` 로 생성. `ENVIRONMENT` 가 `local` 이 아니면 필수
+- `ALLOW_SIGNUP=false`: 가입 차단 (개인용이면 첫 계정을 만든 뒤 끈다)
+- 인증 도입 전에 만든 스레드·에이전트는 **처음 가입한 계정**에 귀속된다
+
+## 개발
+
+```bash
+uv run pytest               # 테스트
+uv run ruff check . && uv run ruff format .
+uv run pyright
+uv run python scripts/export_openapi.py ../FE-Agent/openapi.json   # FE 타입 생성용 스펙
+```
+
+### Postgres 로 전환
+
+```bash
+docker compose up -d postgres
+# .env
+DATABASE_URL=postgresql+asyncpg://agent:agent@localhost:5432/agent
+```
+
+스레드 테이블과 LangGraph 체크포인트가 같은 Postgres 에 저장된다.
+
+### MCP 도구 추가
+
+`mcp_servers.example.json` 을 `mcp_servers.json` 으로 복사해 수정하고 `.env` 에 `MCP_CONFIG_PATH=./mcp_servers.json` 을 설정한다.
+
+## 다음 단계 (TODO)
+
+- Alembic 마이그레이션 (현재는 시작 시 `create_all`)
+- Human-in-the-loop: LangGraph `interrupt` ↔ AI SDK `tool-approval-request`
+- 긴 작업용 백그라운드 실행 + 재연결 가능한 스트림 (Redis)

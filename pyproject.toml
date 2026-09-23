@@ -1,0 +1,59 @@
+[project]
+name = "be-agent"
+version = "0.1.0"
+description = "LangGraph 기반 멀티 모델 에이전트 백엔드 (FastAPI + AI SDK 호환 SSE)"
+readme = "README.md"
+authors = [
+    { name = "akdrhtn1", email = "akdrhtn@kakao.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "langchain>=1.0",
+    "langchain-anthropic>=1.7.3",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-openai>=1.6.4",
+    "langfuse>=4.15.4",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.14.0",
+    "sqlalchemy[asyncio]>=2.0.54",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[project.scripts]
+be-agent = "be_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
