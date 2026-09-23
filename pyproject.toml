@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "LangGraph 기반 멀티 모델 에이전트 백엔드 (FastAPI + AI SDK 호환 SSE)"
 readme = "README.md"
 authors = [
-    { name = "akdrhtn1", email = "akdrhtn@kakao.com" }
+    { name = "akdrhtn1" }
 ]
 requires-python = ">=3.13"
 dependencies = [
