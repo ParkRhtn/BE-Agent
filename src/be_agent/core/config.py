@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
     allow_signup: bool = True
 
+    # 비밀번호 재설정 메일. smtp_host 가 없으면 메일 대신 서버 로그에 링크를 출력한다 (로컬 개발용).
+    frontend_url: str = "http://localhost:3000"
+    password_reset_expire_minutes: int = 30
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None  # 없으면 smtp_username
+    smtp_starttls: bool = True
+
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
     langfuse_host: str | None = None

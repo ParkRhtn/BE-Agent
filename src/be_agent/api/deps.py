@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from be_agent.agent.service import AgentService
 from be_agent.core.config import Settings
-from be_agent.core.security import decode_access_token
+from be_agent.core.security import as_utc, decode_access_token
 from be_agent.db.models import User
 
 _bearer = HTTPBearer(auto_error=False)
@@ -36,8 +36,11 @@ async def get_current_user(
     settings: SettingsDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> User:
-    user_id = decode_access_token(credentials.credentials, secret=settings.jwt_secret) if credentials else None
-    user = await session.get(User, user_id) if user_id else None
+    claims = decode_access_token(credentials.credentials, secret=settings.jwt_secret) if credentials else None
+    user = await session.get(User, claims.user_id) if claims else None
+    # 비밀번호 변경 이전에 발급된 토큰은 거부
+    if user and claims and user.password_changed_at and claims.issued_at < as_utc(user.password_changed_at):
+        user = None
     if user is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "로그인이 필요합니다.", headers={"WWW-Authenticate": "Bearer"}
