@@ -105,3 +105,46 @@ async def test_usage_aggregates_langfuse_metrics(monkeypatch: pytest.MonkeyPatch
     assert usage.daily[0].date == "2026-09-23"
     # 이 사용자의 모델 호출만 센다
     assert all({"column": "userId", "operator": "=", "value": "u1", "type": "string"} in q["filters"] for q in seen)
+
+
+def test_workflow_run_history(client: TestClient) -> None:
+    from tests.test_workflows import edge, node
+
+    body = {"name": "wf", "graph": {"nodes": BRANCHING[0], "edges": BRANCHING[1]}}
+    workflow_id = client.post("/api/v1/workflows", json=body).json()["id"]
+    first = parse_sse(client.post(f"/api/v1/workflows/{workflow_id}/run", json={"input": "hello"}).text)[0]["run_id"]
+    second = parse_sse(client.post(f"/api/v1/workflows/{workflow_id}/run", json={"input": "bye"}).text)[0]["run_id"]
+
+    runs = client.get(f"/api/v1/workflows/{workflow_id}/runs").json()
+    assert [r["id"] for r in runs] == [second, first]  # 새것부터
+    assert runs[1]["status"] == "done" and runs[1]["input"] == "hello"
+    assert runs[1]["output"].startswith("YES")
+    assert runs[1]["finished_at"] is not None
+
+    detail = client.get(f"/api/v1/runs/{first}").json()
+    status = {s["node_id"]: s["status"] for s in detail["steps"]}
+    assert status == {
+        "start": "done",
+        "llm_1": "done",
+        "cond_1": "done",
+        "end_yes": "done",
+        "tool_1": "skipped",
+        "end_no": "skipped",
+    }
+    llm = next(s for s in detail["steps"] if s["node_id"] == "llm_1")
+    assert llm["output"] == "(fake 모델) 입력하신 내용: 요약: hello"
+
+    # 실패한 실행도 남는다
+    nodes = [node("start", "start"), node("tool_1", "tool", tool="get_current_time", args='{"timezone": 123}')]
+    nodes.append(node("end", "end"))
+    bad = client.post(
+        "/api/v1/workflows",
+        json={"name": "bad", "graph": {"nodes": nodes, "edges": [edge("start", "tool_1"), edge("tool_1", "end")]}},
+    ).json()["id"]
+    parse_sse(client.post(f"/api/v1/workflows/{bad}/run", json={"input": "x"}).text)
+    failed = client.get(f"/api/v1/workflows/{bad}/runs").json()[0]
+    assert failed["status"] == "error" and failed["error"].startswith("tool_1:")
+
+    login_as(client, "other@example.com")
+    assert client.get(f"/api/v1/runs/{first}").status_code == 404
+    assert client.get(f"/api/v1/workflows/{workflow_id}/runs").status_code == 404

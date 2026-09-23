@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FeedbackUpdate(BaseModel):
@@ -11,6 +12,30 @@ class FeedbackUpdate(BaseModel):
 class FeedbackRead(BaseModel):
     run_id: str
     feedback: int | None
+
+
+class RunStep(BaseModel):
+    node_id: str
+    status: str  # running | done | skipped | error
+    output: str | None = None
+    error: str | None = None
+
+
+class RunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    status: str | None
+    input: str | None
+    output: str | None
+    error: str | None
+    feedback: int | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class RunDetail(RunSummary):
+    steps: list[RunStep]
 
 
 class UsageRow(BaseModel):

@@ -131,4 +131,11 @@ class Run(Base):
     trace_id: Mapped[str] = mapped_column(String(32))
     feedback: Mapped[int | None] = mapped_column()  # 1 = 좋아요, -1 = 별로
     feedback_comment: Mapped[str | None] = mapped_column(Text)
+    # 워크플로우 실행 기록 (채팅은 대화 이력이 따로 있어 비워 둔다)
+    status: Mapped[str | None] = mapped_column(String(20))  # running | done | error | cancelled
+    input: Mapped[str | None] = mapped_column(Text)
+    output: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    steps: Mapped[list[dict] | None] = mapped_column(JSON)  # [{node_id, status, output?, error?}] 실행 순서
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)

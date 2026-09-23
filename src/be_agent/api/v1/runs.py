@@ -3,9 +3,18 @@ from fastapi import APIRouter, HTTPException, Query, status
 from be_agent.api.deps import CurrentUserDep, SessionDep, SettingsDep, TracingDep
 from be_agent.core.usage import load_usage
 from be_agent.db.models import Run
-from be_agent.schemas.runs import FeedbackRead, FeedbackUpdate, UsageRead
+from be_agent.schemas.runs import FeedbackRead, FeedbackUpdate, RunDetail, RunSummary, UsageRead
 
 router = APIRouter(tags=["runs"])
+
+
+@router.get("/runs/{run_id}", response_model=RunDetail)
+async def get_run(run_id: str, session: SessionDep, user: CurrentUserDep) -> RunDetail:
+    """실행 한 번의 입력·노드별 결과·최종 출력."""
+    run = await session.get(Run, run_id)
+    if run is None or run.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "실행 기록을 찾을 수 없습니다.")
+    return RunDetail.model_validate({**RunSummary.model_validate(run).model_dump(), "steps": run.steps or []})
 
 
 @router.put("/runs/{run_id}/feedback", response_model=FeedbackRead)

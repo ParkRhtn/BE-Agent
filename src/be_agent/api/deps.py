@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from be_agent.agent.service import AgentService
 from be_agent.core.config import Settings
@@ -28,6 +28,11 @@ def get_tracing(request: Request) -> Tracing:
     return request.app.state.tracing
 
 
+def get_sessionmaker(request: Request) -> async_sessionmaker:
+    """요청이 끝난 뒤에도 쓸 DB 세션용 (스트리밍 작업 안에서 결과 저장 등)."""
+    return request.app.state.sessionmaker
+
+
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -36,6 +41,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 TracingDep = Annotated[Tracing, Depends(get_tracing)]
+SessionMakerDep = Annotated[async_sessionmaker, Depends(get_sessionmaker)]
 
 
 async def get_current_user(
