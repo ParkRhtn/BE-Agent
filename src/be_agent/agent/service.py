@@ -78,6 +78,24 @@ class AgentService:
             logger.exception("Agent run failed (thread=%s, model=%s)", thread_id, spec.model)
             yield RunError(message=f"{type(exc).__name__}: {exc}")
 
+    def create_model(self, name: str) -> BaseChatModel:
+        return self._model_factory(name)
+
+    def get_tool(self, name: str) -> BaseTool | None:
+        return self._tools.get(name)
+
+    async def run_once(self, *, spec: AgentSpec, message: str, run_id: str) -> str:
+        """대화 이력을 남기지 않고 에이전트를 한 번 실행해 최종 답변만 돌려준다 (워크플로우용)."""
+        thread_id = f"workflow-run-{run_id}"
+        try:
+            result = await self._get_agent(spec).ainvoke(
+                {"messages": [HumanMessage(content=message)]},
+                self._config(thread_id),  # type: ignore[arg-type]
+            )
+            return result["messages"][-1].text
+        finally:
+            await self.checkpointer.adelete_thread(thread_id)
+
     async def get_messages(self, thread_id: str) -> list[BaseMessage]:
         checkpoint = await self.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}})
         if checkpoint is None:

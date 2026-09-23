@@ -57,8 +57,21 @@ src/be_agent/
 | POST | `/api/v1/threads/{id}/chat` | 메시지 전송, SSE 스트리밍 응답 |
 | GET/POST | `/api/v1/agents` | 에이전트 목록 / 생성 (이름·시스템 프롬프트·모델·도구) |
 | GET/PATCH/DELETE | `/api/v1/agents/{id}` | 에이전트 조회 / 수정 / 삭제 (연결된 스레드는 기본 에이전트로 전환) |
+| GET/POST | `/api/v1/workflows` | 워크플로우 목록 / 생성 (그래프는 React Flow 형식) |
+| GET/PATCH/DELETE | `/api/v1/workflows/{id}` | 워크플로우 조회 / 저장 (미완성도 저장 가능) / 삭제 |
+| POST | `/api/v1/workflows/{id}/run` | 검증 후 실행, 노드별 이벤트를 SSE 로 스트리밍 |
 | GET | `/api/v1/tools` | 에이전트에 붙일 수 있는 도구 목록 (기본 + MCP) |
 | GET | `/api/v1/models` | 기본 모델 / 허용 모델 목록 |
+
+## 워크플로우
+
+`workflow/engine.py` 가 그래프를 검증하고 실행한다. 노드: `start` · `llm` · `agent` · `tool` · `condition` · `end`.
+
+- 위상 정렬 순서로 하나씩 실행 (순환 금지). 활성 연결이 하나도 없는 노드는 건너뛴다
+- 조건 노드는 `"true"`/`"false"` 를 출력하고, 같은 이름의 `sourceHandle` 연결만 활성화된다
+- 노드 설정의 `{{input}}`, `{{노드ID}}` 는 사용자 입력 / 해당 노드 출력으로 치환된다
+- 에이전트 노드는 대화 이력을 남기지 않고 한 번 실행한다
+- 실행 이벤트: `run_start` · `node_start` · `node_delta`(LLM 스트리밍) · `node_finish` · `node_skip` · `node_error` · `run_finish`
 
 ## 인증
 
