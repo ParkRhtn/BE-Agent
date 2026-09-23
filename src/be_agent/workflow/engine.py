@@ -1,7 +1,7 @@
 """워크플로우 그래프 검증과 실행.
 
 실행 규칙
-- 노드는 위상 정렬 순서로 하나씩 실행한다 (순환 금지).
+- LangGraph StateGraph 로 컴파일해 실행한다 (순환 금지). 서로 무관한 갈래는 동시에 실행된다.
 - 들어오는 엣지 중 하나라도 "활성"이면 실행하고, 모두 비활성이면 건너뛴다.
   엣지는 출발 노드가 실행되었을 때 활성이며, 조건 노드에서는 결과("true"/"false")와 같은 핸들의 엣지만 활성이다.
 - 각 노드의 출력은 문자열이며 `{{노드ID}}` 로 참조한다. 사용자 입력은 `{{input}}`.
@@ -11,19 +11,29 @@ import json
 import re
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, Protocol, TypedDict
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
 
 from be_agent.agent.service import AgentSpec
 from be_agent.schemas.workflows import WorkflowGraph, WorkflowNode
 
 _TEMPLATE = re.compile(r"\{\{\s*([\w-]+)\s*\}\}")
 CONDITION_OPERATORS = ("contains", "not_contains", "equals", "not_equals", "is_empty", "not_empty")
+
+
+def _merge(left: dict[str, str], right: dict[str, str]) -> dict[str, str]:
+    return {**left, **right}
+
+
+def _latest(left: str | None, right: str | None) -> str | None:
+    return right if right is not None else left
 
 
 def render(template: str, variables: dict[str, str]) -> str:
@@ -165,11 +175,16 @@ class RunEvent:
         return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
-@dataclass
-class _RunState:
-    variables: dict[str, str]
-    executed: dict[str, str] = field(default_factory=dict)  # node_id -> 출력
-    final_output: str = ""
+class _GraphState(TypedDict):
+    """LangGraph 상태. 같은 단계에서 병렬로 끝난 노드들의 결과는 합쳐진다."""
+
+    variables: Annotated[dict[str, str], _merge]  # {{이름}} 으로 쓸 값: input + 실행된 노드 출력
+    executed: Annotated[dict[str, str], _merge]  # 실행된 노드 → 출력 (조건 노드는 "true"/"false")
+    final_output: Annotated[str | None, _latest]
+
+
+class _NodeFailed(Exception):
+    """노드 하나가 실패하면 실행 전체를 멈춘다 (node_error 이벤트는 이미 보냈다)."""
 
 
 def evaluate_condition(operator: str, left: str, right: str) -> bool:
@@ -189,86 +204,144 @@ def evaluate_condition(operator: str, left: str, right: str) -> bool:
     raise ValueError(f"알 수 없는 조건: {operator}")
 
 
-def _trace_input(node: WorkflowNode, state: _RunState) -> Any:
+def tool_output_text(output: Any) -> str:
+    """도구 결과를 다음 노드가 읽을 글로. MCP 도구는 [{"type": "text", "text": ...}] 조각 목록을 돌려준다."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list) and output and all(isinstance(p, dict) and "text" in p for p in output):
+        return "\n\n".join(str(p["text"]) for p in output)
+    return json.dumps(output, ensure_ascii=False)
+
+
+def _trace_input(node: WorkflowNode, variables: dict[str, str]) -> Any:
     """추적 기록에 남길 노드 입력: 변수를 채운 설정값."""
     if node.type == "start":
-        return state.variables["input"]
-    return {k: render(v, state.variables) if isinstance(v, str) else v for k, v in node.data.items()}
+        return variables["input"]
+    return {k: render(v, variables) if isinstance(v, str) else v for k, v in node.data.items()}
 
 
 class WorkflowExecutor:
+    """캔버스 그래프를 LangGraph StateGraph 로 컴파일해 실행한다.
+
+    - 캔버스 노드 하나 = LangGraph 노드 하나, 연결선 = 엣지. 앞 노드가 여럿이면 모두 끝난 뒤 한 번 실행한다.
+    - 모든 노드는 자기 차례에 실행되고, 활성 연결이 없으면 "건너뜀"만 남긴다.
+      (조건으로 한쪽 갈래가 건너뛰어져도 합류 노드가 기다리다 멈추지 않게)
+    - 서로 무관한 갈래는 같은 단계에서 동시에 실행된다.
+    - 노드 이벤트는 LangGraph custom 스트림으로 내보낸다.
+    """
+
     def __init__(self, graph: WorkflowGraph, runtime: Runtime, agents: dict[str, AgentSpec]) -> None:
-        order = topological_order(graph)
-        if order is None:
+        if topological_order(graph) is None:
             raise ValueError("순환이 있는 그래프는 실행할 수 없습니다.")
-        self._order = order
         self._graph = graph
         self._runtime = runtime
         self._agents = agents
+        self._types = {n.id: n.type for n in graph.nodes}
+        self._compiled = self._build()
 
-    def _is_active(self, node: WorkflowNode, state: _RunState) -> bool:
+    def _build(self) -> Any:
+        builder = StateGraph(_GraphState)
+        for node in self._graph.nodes:
+            builder.add_node(node.id, self._node_fn(node))
+
+        predecessors: dict[str, list[str]] = {n.id: [] for n in self._graph.nodes}
+        has_next: set[str] = set()
+        for edge in self._graph.edges:
+            if edge.source not in predecessors[edge.target]:  # 참·거짓이 같은 노드로 가도 한 번만
+                predecessors[edge.target].append(edge.source)
+            has_next.add(edge.source)
+
+        for node_id, sources in predecessors.items():
+            if not sources:
+                builder.add_edge(START, node_id)  # 시작 노드 (그리고 아무 데서도 오지 않는 노드는 바로 건너뜀)
+            elif len(sources) == 1:
+                builder.add_edge(sources[0], node_id)
+            else:
+                builder.add_edge(sources, node_id)  # 앞 노드가 모두 끝난 뒤 한 번
+            if node_id not in has_next:
+                builder.add_edge(node_id, END)
+        return builder.compile()
+
+    def _is_active(self, node: WorkflowNode, executed: dict[str, str]) -> bool:
         if node.type == "start":
             return True
-        by_id = {n.id: n for n in self._graph.nodes}
         for edge in self._graph.edges:
-            if edge.target != node.id or edge.source not in state.executed:
+            if edge.target != node.id or edge.source not in executed:
                 continue
-            if by_id[edge.source].type != "condition" or edge.sourceHandle == state.executed[edge.source]:
+            if self._types[edge.source] != "condition" or edge.sourceHandle == executed[edge.source]:
                 return True
         return False
 
-    def _active_input(self, node: WorkflowNode, state: _RunState) -> str:
+    def _active_input(self, node_id: str, executed: dict[str, str]) -> str:
         """활성 연결로 들어온 출력. 조건 노드는 "true"/"false" 대신 조건 노드가 받은 값을 넘겨준다."""
-        by_id = {n.id: n for n in self._graph.nodes}
         for edge in self._graph.edges:
-            if edge.target != node.id or edge.source not in state.executed:
+            if edge.target != node_id or edge.source not in executed:
                 continue
-            source = by_id[edge.source]
-            if source.type != "condition":
-                return state.executed[source.id]
-            if edge.sourceHandle == state.executed[source.id]:
-                return self._active_input(source, state)
+            if self._types[edge.source] != "condition":
+                return executed[edge.source]
+            if edge.sourceHandle == executed[edge.source]:
+                return self._active_input(edge.source, executed)
         return ""
 
-    async def run(self, user_input: str, *, run_id: str | None = None) -> AsyncIterator[RunEvent]:
-        state = _RunState(variables={"input": user_input})
-        yield RunEvent(type="run_start", run_id=run_id)
+    def _node_fn(self, node: WorkflowNode) -> Any:
+        async def run_node(state: _GraphState) -> dict[str, Any]:
+            write = get_stream_writer()
+            if not self._is_active(node, state["executed"]):
+                write(RunEvent(type="node_skip", node_id=node.id).to_dict())
+                return {}
 
-        for node in self._order:
-            if not self._is_active(node, state):
-                yield RunEvent(type="node_skip", node_id=node.id)
-                continue
-
-            yield RunEvent(type="node_start", node_id=node.id)
+            write(RunEvent(type="node_start", node_id=node.id).to_dict())
             deltas: list[str] = []
-            with self._runtime.trace_node(node.id, node.type, _trace_input(node, state)) as trace:
+            result: dict[str, str] = {}
+            with self._runtime.trace_node(node.id, node.type, _trace_input(node, state["variables"])) as trace:
                 try:
-                    async for delta in self._execute(node, state):
+                    async for delta in self._execute(node, state, result):
                         deltas.append(delta)
-                        yield RunEvent(type="node_delta", node_id=node.id, delta=delta)
-                    output = state.executed[node.id] if node.id in state.executed else "".join(deltas)
-                except Exception as exc:  # 노드 하나가 실패하면 실행을 멈춘다
+                        write(RunEvent(type="node_delta", node_id=node.id, delta=delta).to_dict())
+                    output = result.get("output", "".join(deltas))
+                except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
                     trace.finish(error=error)
-                    yield RunEvent(type="node_error", node_id=node.id, error=error)
-                    return
+                    write(RunEvent(type="node_error", node_id=node.id, error=error).to_dict())
+                    raise _NodeFailed(error) from exc
                 trace.finish(output=output)
 
-            state.executed[node.id] = output
-            state.variables[node.id] = output
-            yield RunEvent(type="node_finish", node_id=node.id, output=output)
+            write(RunEvent(type="node_finish", node_id=node.id, output=output).to_dict())
+            update: dict[str, Any] = {"executed": {node.id: output}, "variables": {node.id: output}}
+            if node.type == "end":
+                update["final_output"] = output
+            return update
 
-        yield RunEvent(type="run_finish", output=state.final_output)
+        return run_node
+
+    async def run(self, user_input: str, *, run_id: str | None = None) -> AsyncIterator[RunEvent]:
+        yield RunEvent(type="run_start", run_id=run_id)
+        initial: _GraphState = {"variables": {"input": user_input}, "executed": {}, "final_output": None}
+        final_output: str | None = None
+        try:
+            async for mode, chunk in self._compiled.astream(
+                initial,
+                # 단계 수 제한: 노드 수만큼이면 충분하다 (순환은 검증에서 막는다)
+                config={"recursion_limit": len(self._graph.nodes) + 10},
+                stream_mode=["custom", "values"],
+            ):
+                if mode == "custom":
+                    yield RunEvent(**chunk)
+                else:
+                    final_output = chunk.get("final_output")
+        except _NodeFailed:
+            return  # 실패한 노드가 node_error 를 이미 보냈다
+        yield RunEvent(type="run_finish", output=final_output or "")
 
     def _call_config(self, node: WorkflowNode) -> RunnableConfig:
         return RunnableConfig(callbacks=self._runtime.callbacks, run_name=node.id)
 
-    async def _execute(self, node: WorkflowNode, state: _RunState) -> AsyncIterator[str]:
-        """스트리밍할 텍스트 조각을 내보낸다. 조각 없이 끝나는 노드는 state.executed 에 직접 출력을 넣는다."""
-        v = state.variables
+    async def _execute(self, node: WorkflowNode, state: _GraphState, result: dict[str, str]) -> AsyncIterator[str]:
+        """스트리밍할 텍스트 조각을 내보낸다. 조각 없이 끝나는 노드는 result["output"] 에 출력을 넣는다."""
+        v = state["variables"]
         match node.type:
             case "start":
-                state.executed[node.id] = v["input"]
+                result["output"] = v["input"]
             case "llm":
                 model = self._runtime.create_model(_text(node, "model") or None)
                 messages: list[Any] = []
@@ -281,22 +354,22 @@ class WorkflowExecutor:
             case "agent":
                 spec = self._agents[_text(node, "agent_id")]
                 message = render(_text(node, "message", "{{input}}"), v)
-                state.executed[node.id] = await self._runtime.run_agent(spec, message)
+                result["output"] = await self._runtime.run_agent(spec, message)
             case "tool":
                 tool = self._runtime.get_tool(_text(node, "tool"))
                 if tool is None:
                     raise ValueError(f"도구를 찾을 수 없습니다: {_text(node, 'tool')}")
                 args = json.loads(_text(node, "args", "{}").strip() or "{}")
                 rendered = {k: render(val, v) if isinstance(val, str) else val for k, val in args.items()}
-                result = await tool.ainvoke(rendered, config=self._call_config(node))
-                state.executed[node.id] = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                output = await tool.ainvoke(rendered, config=self._call_config(node))
+                result["output"] = tool_output_text(output)
             case "condition":
                 left = render(_text(node, "left", "{{input}}"), v)
                 right = render(_text(node, "right"), v)
                 passed = evaluate_condition(_text(node, "operator", "contains"), left, right)
-                state.executed[node.id] = "true" if passed else "false"
+                result["output"] = "true" if passed else "false"
             case "end":
                 template = _text(node, "output")
-                output = render(template, v) if template.strip() else self._active_input(node, state)
-                state.executed[node.id] = output
-                state.final_output = output
+                result["output"] = (
+                    render(template, v) if template.strip() else self._active_input(node.id, state["executed"])
+                )
