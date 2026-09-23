@@ -51,3 +51,10 @@ def test_delete_thread(client: TestClient) -> None:
     client.post(f"/api/v1/threads/{thread_id}/chat", json={"message": "hi"})
     assert client.delete(f"/api/v1/threads/{thread_id}").status_code == 204
     assert client.get(f"/api/v1/threads/{thread_id}").status_code == 404
+
+
+def test_timestamps_are_utc_aware(client: TestClient) -> None:
+    thread = client.post("/api/v1/threads", json={}).json()
+    # SQLite 에서도 시간대가 붙어 나와야 브라우저가 현지 시각으로 올바르게 바꾼다
+    assert thread["created_at"].endswith(("Z", "+00:00"))
+    assert client.get(f"/api/v1/threads/{thread['id']}").json()["updated_at"].endswith(("Z", "+00:00"))
