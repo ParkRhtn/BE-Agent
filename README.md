@@ -1,5 +1,7 @@
 # BE-Agent
 
+[![CI](https://github.com/ParkRhtn/BE-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ParkRhtn/BE-Agent/actions/workflows/ci.yml)
+
 LangGraph 기반 멀티 모델 에이전트 백엔드. FE(`../FE-Agent`, Next.js + Vercel AI SDK)와 SSE 로 연동한다.
 
 ## 스택
