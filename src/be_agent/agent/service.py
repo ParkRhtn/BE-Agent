@@ -47,6 +47,10 @@ class AgentService:
         self._agents: dict[AgentSpec, CompiledStateGraph[Any, Any, Any, Any]] = {}
 
     @property
+    def callbacks(self) -> list[BaseCallbackHandler]:
+        return self._callbacks
+
+    @property
     def tools(self) -> list[BaseTool]:
         return list(self._tools.values())
 

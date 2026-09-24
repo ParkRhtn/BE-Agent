@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -11,9 +12,14 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from be_agent.agent.service import AgentService
 from be_agent.api.v1.router import api_router
 from be_agent.core.config import Settings, get_settings
+from be_agent.core.crypto import SecretBox
 from be_agent.core.observability import create_tracing
+from be_agent.core.usage import UsageCallback
 from be_agent.db.session import create_engine, create_sessionmaker, init_db
 from be_agent.tools import BASIC_TOOLS, load_mcp_tools
+from be_agent.tools.telegram import make_telegram_tool
+from be_agent.workflow.runner import WorkflowRunner
+from be_agent.workflow.scheduler import WorkflowScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +47,32 @@ def create_app(settings: Settings | None = None, *, trace_exporter: Any = None) 
         await init_db(engine)
         async with AsyncExitStack() as stack:
             checkpointer = await _open_checkpointer(stack, settings)
-            tools = [*BASIC_TOOLS, *await load_mcp_tools(settings.mcp_config_path)]
+            sessionmaker = create_sessionmaker(engine)
+            tools = [
+                *BASIC_TOOLS,
+                make_telegram_tool(sessionmaker, SecretBox(settings.secret_box_key)),
+                *await load_mcp_tools(settings.mcp_config_path),
+            ]
             tracing = create_tracing(settings, span_exporter=trace_exporter)
             app.state.tracing = tracing
             app.state.settings = settings
-            app.state.sessionmaker = create_sessionmaker(engine)
+            app.state.sessionmaker = sessionmaker
             app.state.agent_service = AgentService(
                 checkpointer=checkpointer,
                 tools=tools,
                 system_prompt=settings.system_prompt,
-                callbacks=tracing.callbacks,
+                callbacks=[*tracing.callbacks, UsageCallback()],
             )
+            app.state.workflow_runner = WorkflowRunner(
+                service=app.state.agent_service, tracing=tracing, sessionmaker=app.state.sessionmaker
+            )
+            scheduler = WorkflowScheduler(app.state.sessionmaker, app.state.workflow_runner, settings)
+            scheduler_task = asyncio.create_task(scheduler.run_forever()) if settings.scheduler_enabled else None
             logger.info("Started with default model %s and tools %s", settings.default_model, [t.name for t in tools])
             yield
+            if scheduler_task:
+                scheduler_task.cancel()
+            await scheduler.shutdown()
             tracing.shutdown()
         await engine.dispose()
 

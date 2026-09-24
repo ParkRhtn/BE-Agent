@@ -10,15 +10,19 @@ def _now() -> datetime:
 
 
 class UTCDateTime(TypeDecorator[datetime]):
-    """SQLite 는 시간대를 버리고 돌려준다. 읽을 때 UTC 를 붙여 API 가 항상 +00:00 이 붙은 시각을 내보내게 한다."""
+    """SQLite 는 시간대를 버리고 돌려준다.
+
+    UTC 로 바꿔 넣고, 읽을 때 UTC 를 붙여 API 가 항상 +00:00 이 붙은 시각을 내보내게 한다.
+    """
 
     impl = DateTime(timezone=True)
     cache_ok = True
 
     def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
-        if value is not None and value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return value
+        # 항상 UTC 로 바꿔 넣는다. SQLite 는 시각을 글자로 비교하므로 한국 시간(+09:00)이 섞이면 순서가 틀어진다.
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is not None and value.tzinfo is None:
@@ -95,6 +99,12 @@ class Workflow(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(String(500))
     graph: Mapped[dict] = mapped_column(JSON)
+    # 예약 실행 {enabled, time: "HH:MM", weekdays: [0=월 … 6=일], input}. 한국 시간 기준
+    schedule: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    # 마지막으로 예약 실행을 맡은 예정 시각. 같은 시각에 두 번 돌지 않게 한다
+    schedule_last_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # 켜 두면 삭제 API 가 거부한다. 기존 DB 에 컬럼을 붙일 수 있게 nullable (None = 꺼짐)
+    delete_protected: Mapped[bool | None] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
 
@@ -126,6 +136,7 @@ class Run(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))  # chat | workflow
+    trigger: Mapped[str | None] = mapped_column(String(20))  # manual | schedule (워크플로우)
     thread_id: Mapped[str | None] = mapped_column(String(36), index=True)
     workflow_id: Mapped[str | None] = mapped_column(String(36), index=True)
     trace_id: Mapped[str] = mapped_column(String(32))
@@ -139,3 +150,34 @@ class Run(Base):
     steps: Mapped[list[dict] | None] = mapped_column(JSON)  # [{node_id, status, output?, error?}] 실행 순서
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class UsageRecord(Base):
+    """모델 호출 한 번의 토큰·비용. 사용량 화면이 이 표를 모은다."""
+
+    __tablename__ = "usage_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    source: Mapped[str] = mapped_column(String(200))  # "대화: 에이전트 이름", "워크플로우: 이름" …
+    model: Mapped[str] = mapped_column(String(200))
+    input_tokens: Mapped[int] = mapped_column(default=0)
+    output_tokens: Mapped[int] = mapped_column(default=0)
+    cost: Mapped[float | None] = mapped_column()  # USD. 가격표에 없는 모델이면 None
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, index=True)
+
+
+class TelegramLink(Base):
+    """사용자가 연결한 텔레그램 봇과, 메시지를 받을 자기 채팅."""
+
+    __tablename__ = "telegram_links"
+
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    bot_token_encrypted: Mapped[str] = mapped_column(Text)
+    token_hint: Mapped[str] = mapped_column(String(20))
+    bot_username: Mapped[str] = mapped_column(String(100))
+    chat_id: Mapped[str] = mapped_column(String(50))
+    chat_name: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)

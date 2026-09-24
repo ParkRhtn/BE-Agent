@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, status
 
-from be_agent.api.deps import CurrentUserDep, SessionDep, SettingsDep, TracingDep
+from be_agent.api.deps import CurrentUserDep, SessionDep, TracingDep
 from be_agent.core.usage import load_usage
 from be_agent.db.models import Run
 from be_agent.schemas.runs import FeedbackRead, FeedbackUpdate, RunDetail, RunSummary, UsageRead
@@ -33,6 +33,6 @@ async def set_feedback(
 
 
 @router.get("/usage", response_model=UsageRead)
-async def get_usage(settings: SettingsDep, user: CurrentUserDep, days: int = Query(30, ge=1, le=90)) -> UsageRead:
-    """최근 N일 모델 사용량과 비용 (Langfuse 집계)."""
-    return await load_usage(settings, user_id=user.id, days=days)
+async def get_usage(session: SessionDep, user: CurrentUserDep, days: int = Query(30, ge=1, le=90)) -> UsageRead:
+    """최근 N일 모델 사용량과 비용. 모델 호출마다 남긴 기록을 모은다."""
+    return await load_usage(session, user_id=user.id, days=days)

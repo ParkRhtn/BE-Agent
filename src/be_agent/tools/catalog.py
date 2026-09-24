@@ -21,6 +21,11 @@ TOOL_DISPLAY: dict[str, ToolDisplay] = {
     "get_current_time": ToolDisplay(
         "현재 시각", "지정한 지역(시간대)의 현재 날짜와 시각을 알려 줍니다.", {"timezone": "Asia/Seoul"}
     ),
+    "send_telegram": ToolDisplay(
+        "텔레그램 보내기",
+        "설정에서 연결한 텔레그램 봇으로 나에게 메시지를 보냅니다. 마크다운 서식을 살리고 긴 글은 나눠 보냅니다.",
+        {"text": "{{llm_1}}"},
+    ),
     # DuckDuckGo MCP
     "search": ToolDisplay(
         "웹 검색", "웹을 검색해 제목, 링크, 요약을 가져옵니다.", {"query": "{{input}}", "max_results": 5}

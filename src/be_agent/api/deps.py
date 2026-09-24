@@ -11,6 +11,7 @@ from be_agent.core.model_registry import ModelRegistry, load_registry
 from be_agent.core.observability import Tracing
 from be_agent.core.security import as_utc, decode_access_token
 from be_agent.db.models import User
+from be_agent.workflow.runner import WorkflowRunner
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -33,6 +34,10 @@ def get_sessionmaker(request: Request) -> async_sessionmaker:
     return request.app.state.sessionmaker
 
 
+def get_workflow_runner(request: Request) -> WorkflowRunner:
+    return request.app.state.workflow_runner
+
+
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -42,6 +47,7 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 TracingDep = Annotated[Tracing, Depends(get_tracing)]
 SessionMakerDep = Annotated[async_sessionmaker, Depends(get_sessionmaker)]
+WorkflowRunnerDep = Annotated[WorkflowRunner, Depends(get_workflow_runner)]
 
 
 async def get_current_user(

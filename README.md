@@ -28,7 +28,9 @@ src/be_agent/
 │   ├── config.py        # 환경변수 설정 (pydantic-settings)
 │   ├── llm.py           # 모델 팩토리 — 모델 생성은 반드시 여기를 거친다
 │   ├── fake_model.py    # 개발용 fake 모델
-│   └── observability.py # Langfuse 콜백
+│   ├── observability.py # Langfuse 콜백
+│   ├── usage.py         # 모델 호출마다 토큰·비용 기록, 사용량 집계
+│   └── pricing.py       # 모델별 토큰 가격표 (비용 계산)
 ├── agent/
 │   ├── service.py       # 모델별 에이전트 그래프 캐시, 스레드 단위 실행
 │   └── stream.py        # LangGraph 스트림 → 내부 이벤트
@@ -92,6 +94,24 @@ FE 의 **설정** 화면에서 Anthropic · OpenAI · OpenAI 호환 서버(Ollam
 - 노드 설정의 `{{input}}`, `{{노드ID}}` 는 사용자 입력 / 해당 노드 출력으로 치환된다
 - 에이전트 노드는 대화 이력을 남기지 않고 한 번 실행한다
 - 실행 이벤트: `run_start` · `node_start` · `node_delta`(LLM 스트리밍) · `node_finish` · `node_skip` · `node_error` · `run_finish`
+
+## 텔레그램 알림
+
+설정 화면에서 내 텔레그램 봇 토큰(@BotFather 에서 발급)을 넣으면, 봇에게 먼저 말을 건 내 채팅을 찾아 연결한다.
+토큰은 암호화해 저장한다. 워크플로우·에이전트의 `send_telegram`(텔레그램 보내기) 도구가 이 채팅으로 보낸다.
+마크다운은 텔레그램 HTML 로 바꿔 보내고, 4096자를 넘는 글은 나눠 보낸다.
+
+## 예약 실행
+
+워크플로우마다 요일·시각(한국 시간)과 입력을 정해 두면 서버 안의 스케줄러(`workflow/scheduler.py`)가 30초마다 확인해 실행한다.
+결과는 실행 기록에 `trigger = "schedule"` 로 남는다. 같은 예정 시각은 한 번만 돌고(DB 조건부 갱신으로 맡음),
+서버가 꺼져 있어 1시간 넘게 놓친 실행은 건너뛴다. `SCHEDULER_ENABLED=false` 로 끌 수 있다.
+
+## 사용량
+
+모델을 부를 때마다 토큰 수를 `usage_records` 표에 남기고, `core/pricing.py` 의 가격표로 비용(USD)을 계산한다.
+`GET /api/v1/usage?days=7|30|90` 이 모델별·워크플로우/대화별·날짜별(한국 시간)로 모아 준다. Langfuse 없이도 동작한다.
+가격표에 없는 모델은 호출·토큰만 세고 비용은 "가격 정보 없음"으로 따로 센다. 새 모델을 쓰면 가격표에 한 줄 추가한다.
 
 ## 추적 (Langfuse)
 

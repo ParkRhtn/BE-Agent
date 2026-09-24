@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages.ai import UsageMetadata
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
@@ -20,7 +21,19 @@ class FakeToolChatModel(BaseChatModel):
     - 마지막 메시지가 도구 결과면: 결과를 요약해 답한다.
     - 사용자가 시간을 물으면: get_current_time 도구를 호출한다.
     - 그 외: 입력을 그대로 되돌려준다.
+
+    토큰 수는 단어 수로 흉내 낸다 (사용량 기록 확인용).
     """
+
+    model_name: str = "echo"
+
+    @staticmethod
+    def _usage(messages: list[BaseMessage], reply: AIMessage) -> UsageMetadata:
+        input_tokens = sum(len(m.text.split()) for m in messages)
+        output_tokens = len(reply.text.split()) + len(reply.tool_calls)
+        return UsageMetadata(
+            input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=input_tokens + output_tokens
+        )
 
     @property
     def _llm_type(self) -> str:
@@ -53,7 +66,9 @@ class FakeToolChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return ChatResult(generations=[ChatGeneration(message=self._respond(messages))])
+        message = self._respond(messages)
+        message.usage_metadata = self._usage(messages, message)
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
     def _stream(
         self,
@@ -86,3 +101,6 @@ class FakeToolChatModel(BaseChatModel):
                     ],
                 )
             )
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="", id=message_id, usage_metadata=self._usage(messages, message))
+        )

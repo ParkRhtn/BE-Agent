@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     # MCP 도구 서버 설정 (git 에 올린다). 키는 파일 안에 ${이름} 으로 쓰고 .env 에 둔다. 끄려면 빈 값.
     mcp_config_path: Path | None = Path("mcp_servers.json")
+    # 워크플로우 예약 실행. 서버를 여러 개 띄우면 하나만 켜도 되지만, 모두 켜도 같은 시각에 두 번 돌지는 않는다.
+    scheduler_enabled: bool = True
 
     # 설정 화면에서 제공사를 등록하지 않았을 때 쓰는 키 (.env). 화면에서 등록한 키가 우선이다.
     anthropic_api_key: str | None = None

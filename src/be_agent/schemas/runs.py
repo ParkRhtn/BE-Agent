@@ -25,6 +25,7 @@ class RunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    trigger: str | None = None  # manual | schedule
     status: str | None
     input: str | None
     output: str | None
@@ -43,6 +44,7 @@ class UsageRow(BaseModel):
     cost: float  # USD
     tokens: int
     calls: int
+    unpriced_calls: int = 0  # 가격표에 없는 모델 호출 (비용에 안 들어감)
 
 
 class UsageDay(BaseModel):
@@ -52,11 +54,12 @@ class UsageDay(BaseModel):
 
 
 class UsageRead(BaseModel):
-    enabled: bool  # Langfuse 가 꺼져 있으면 false
+    enabled: bool = True
     days: int
     total_cost: float = 0
     total_tokens: int = 0
     calls: int = 0
+    unpriced_calls: int = 0
     by_model: list[UsageRow] = []
     by_source: list[UsageRow] = []  # 워크플로우·대화별
     daily: list[UsageDay] = []

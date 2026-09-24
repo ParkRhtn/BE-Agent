@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 
@@ -6,9 +7,19 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from be_agent.agent.service import AgentSpec
-from be_agent.api.deps import AgentServiceDep, CurrentUserDep, ModelRegistryDep, SessionDep, TracingDep, ensure_model
+from be_agent.api.deps import (
+    AgentServiceDep,
+    CurrentUserDep,
+    ModelRegistryDep,
+    SessionDep,
+    SessionMakerDep,
+    TracingDep,
+    ensure_model,
+)
+from be_agent.core.context import current_user_id
 from be_agent.core.model_registry import ModelNotAvailable
 from be_agent.core.observability import Tracing
+from be_agent.core.usage import collect_usage, save_usage
 from be_agent.db.models import Agent, Run, Thread, User
 from be_agent.schemas.threads import ChatRequest, ThreadCreate, ThreadRead, ThreadUpdate, UIMessage
 from be_agent.streaming.ai_sdk import AI_SDK_HEADERS, encode_ai_sdk_stream, run_message_ids, to_ui_messages
@@ -99,6 +110,7 @@ async def chat(
     agent: AgentServiceDep,
     registry: ModelRegistryDep,
     tracing: TracingDep,
+    sessionmaker: SessionMakerDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
     """메시지를 보내고 에이전트 응답을 SSE 로 스트리밍한다 (Vercel AI SDK useChat 호환)."""
@@ -135,18 +147,26 @@ async def chat(
     user_id, trace_id = user.id, run.trace_id
 
     async def traced() -> AsyncIterator[str]:
-        # 대화 한 번 = Langfuse 기록 하나. 모델·도구 호출은 이 기록 아래에 붙는다.
-        with tracing.trace(
-            name, user_id=user_id, session_id=thread_id, tags=tags, input=body.message, trace_id=trace_id
-        ):
-            events = agent.stream(
-                thread_id=thread_id,
-                message=body.message,
-                spec=spec,
-                run_name="에이전트",
-                message_id=user_message_id,
-            )
-            async for chunk in encode_ai_sdk_stream(events, message_id=answer_message_id, metadata={"runId": run_id}):
-                yield chunk
+        current_user_id.set(user_id)  # 사용자별 설정이 필요한 도구(텔레그램 등)용
+        with collect_usage() as usage:
+            try:
+                # 대화 한 번 = Langfuse 기록 하나. 모델·도구 호출은 이 기록 아래에 붙는다.
+                with tracing.trace(
+                    name, user_id=user_id, session_id=thread_id, tags=tags, input=body.message, trace_id=trace_id
+                ):
+                    events = agent.stream(
+                        thread_id=thread_id,
+                        message=body.message,
+                        spec=spec,
+                        run_name="에이전트",
+                        message_id=user_message_id,
+                    )
+                    async for chunk in encode_ai_sdk_stream(
+                        events, message_id=answer_message_id, metadata={"runId": run_id}
+                    ):
+                        yield chunk
+            finally:
+                # 중간에 멈춰도 이미 부른 모델 호출은 사용량에 남긴다
+                await asyncio.shield(save_usage(sessionmaker, usage, user_id=user_id, run_id=run_id, source=name))
 
     return StreamingResponse(stream_in_task(traced), media_type="text/event-stream", headers=AI_SDK_HEADERS)

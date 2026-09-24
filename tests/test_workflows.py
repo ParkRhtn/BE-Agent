@@ -150,3 +150,18 @@ def test_crud_and_isolation(client: TestClient) -> None:
     login_as(client, "other@example.com")
     assert client.get(f"/api/v1/workflows/{workflow_id}").status_code == 404
     assert client.post(f"/api/v1/workflows/{workflow_id}/run", json={"input": "x"}).status_code == 404
+
+
+def test_delete_protection(client: TestClient) -> None:
+    workflow_id = _create(client, [node("start", "start"), node("end", "end")], [edge("start", "end")])
+    assert client.get(f"/api/v1/workflows/{workflow_id}").json()["delete_protected"] is False
+
+    protected = client.patch(f"/api/v1/workflows/{workflow_id}", json={"delete_protected": True})
+    assert protected.json()["delete_protected"] is True
+    blocked = client.delete(f"/api/v1/workflows/{workflow_id}")
+    assert blocked.status_code == 409 and "삭제 보호" in blocked.json()["detail"]
+    # 보호 중에도 이름·그래프 수정은 된다
+    assert client.patch(f"/api/v1/workflows/{workflow_id}", json={"name": "새 이름"}).status_code == 200
+
+    client.patch(f"/api/v1/workflows/{workflow_id}", json={"delete_protected": False})
+    assert client.delete(f"/api/v1/workflows/{workflow_id}").status_code == 204

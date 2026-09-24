@@ -22,6 +22,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from be_agent.agent.service import AgentSpec
+from be_agent.core.errors import UserFacingError
 from be_agent.schemas.workflows import WorkflowGraph, WorkflowNode
 
 _TEMPLATE = re.compile(r"\{\{\s*([\w-]+)\s*\}\}")
@@ -300,7 +301,7 @@ class WorkflowExecutor:
                         write(RunEvent(type="node_delta", node_id=node.id, delta=delta).to_dict())
                     output = result.get("output", "".join(deltas))
                 except Exception as exc:
-                    error = f"{type(exc).__name__}: {exc}"
+                    error = str(exc) if isinstance(exc, UserFacingError) else f"{type(exc).__name__}: {exc}"
                     trace.finish(error=error)
                     write(RunEvent(type="node_error", node_id=node.id, error=error).to_dict())
                     raise _NodeFailed(error) from exc
