@@ -31,7 +31,8 @@ class ModelCall:
     input_tokens: int
     output_tokens: int
     cache_read: int = 0
-    cache_write: int = 0
+    cache_write: int = 0  # 5분 캐시
+    cache_write_1h: int = 0
 
 
 @dataclass
@@ -91,7 +92,11 @@ class UsageCallback(BaseCallbackHandler):
                         input_tokens=usage.get("input_tokens", 0),
                         output_tokens=usage.get("output_tokens", 0),
                         cache_read=details.get("cache_read") or 0,
-                        cache_write=details.get("cache_creation") or 0,
+                        # langchain-anthropic 은 5분/1시간 구분이 오면 cache_creation 을 0 으로 비우고
+                        # ephemeral_* 에 나눠 담는다. 구분이 없으면 cache_creation 에 담긴다 (5분 캐시).
+                        cache_write=(details.get("cache_creation") or 0)
+                        + (details.get("ephemeral_5m_input_tokens") or 0),
+                        cache_write_1h=details.get("ephemeral_1h_input_tokens") or 0,
                     )
                 )
 
@@ -139,6 +144,7 @@ async def save_usage(
                         output_tokens=call.output_tokens,
                         cache_read=call.cache_read,
                         cache_write=call.cache_write,
+                        cache_write_1h=call.cache_write_1h,
                     ),
                 )
             )
