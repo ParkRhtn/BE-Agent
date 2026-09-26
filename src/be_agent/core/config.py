@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     # 설정 화면에서 제공사를 등록하지 않았을 때 쓰는 키 (.env). 화면에서 등록한 키가 우선이다.
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
+
+    # 외부 API (API 키로 부르는 /api/v1/ext/*). 키 하나당 1분에 이만큼까지. 서버 프로세스마다 따로 센다.
+    ext_rate_limit_per_minute: int = 60
+    # 공개 링크(iframe). 누구나 부를 수 있으므로 링크 하나당 1분에 이만큼까지 (하루 한도는 링크마다 따로 정한다)
+    embed_rate_limit_per_minute: int = 20
+
+    # 크레딧. 위의 서버 키(.env)로 부른 모델만 실측 원가만큼 차감한다. 사용자가 등록한 키는 차감하지 않는다.
+    # false 면 차감 기록은 남기되 잔액이 없어도 막지 않는다 (로컬 개발용). 공개 운영에서는 반드시 true.
+    credits_enforced: bool = False
+    # 원가 1 USD 가 몇 크레딧인가. 500 이면 1 크레딧 = 원가 $0.002. 판매 마진은 플랜 가격에서 붙인다.
+    credits_per_usd: float = 500
+    signup_credits: float = 0  # 가입할 때 주는 체험 크레딧
+    admin_emails: list[str] = []  # 크레딧 충전·조정 API 를 쓸 수 있는 계정
     # 제공사 API 키 암호화용. 없으면 JWT_SECRET 에서 만든다 (그 경우 JWT_SECRET 을 바꾸면 저장된 키를 못 읽는다).
     encryption_key: str | None = None
 

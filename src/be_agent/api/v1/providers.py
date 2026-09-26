@@ -152,6 +152,7 @@ async def test_provider_model(
         model=body.model,
         api_key=_api_key(settings, provider),
         base_url=provider.base_url,
+        billing="user",
     )
     started = time.perf_counter()
     try:

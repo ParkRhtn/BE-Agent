@@ -20,10 +20,12 @@ def test_chat_answer_id_is_stable_and_feedback_is_kept(client: TestClient) -> No
     run_id = start["messageMetadata"]["runId"]
     assert start["messageId"] == f"msg-{run_id}"
 
-    # 새로고침 후 이력에서도 같은 답변 ID·실행 ID
-    answer = client.get(f"/api/v1/threads/{thread_id}/messages").json()[1]
+    # 새로고침 후 이력에서도 같은 답변 ID·실행 ID·시각 (시각은 화면에 보여 준다)
+    question, answer = client.get(f"/api/v1/threads/{thread_id}/messages").json()
     assert answer["id"] == f"msg-{run_id}"
-    assert answer["metadata"] == {"runId": run_id}
+    assert answer["metadata"] == {"runId": run_id, "createdAt": start["messageMetadata"]["createdAt"]}
+    assert question["metadata"]["createdAt"] == answer["metadata"]["createdAt"]
+    assert datetime.fromisoformat(answer["metadata"]["createdAt"]).tzinfo is not None  # 시간대 포함
 
     assert client.put(f"/api/v1/runs/{run_id}/feedback", json={"value": -1}).json() == {
         "run_id": run_id,

@@ -10,6 +10,8 @@ class ModelOption(BaseModel):
     id: str  # 에이전트·스레드·워크플로우에 저장되는 값
     label: str
     provider: str  # 제공사 표시 이름
+    billing: Literal["platform", "user", "free"]  # platform 이면 크레딧 차감
+    blocked_reason: str | None = None  # 지금 쓸 수 없는 이유 (크레딧 부족 등)
 
 
 class ModelsRead(BaseModel):

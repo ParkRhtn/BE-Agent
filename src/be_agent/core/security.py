@@ -55,3 +55,16 @@ def new_reset_token() -> tuple[str, str]:
 
 def hash_reset_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+API_KEY_PREFIX = "sk-be-"
+
+
+def new_api_key() -> tuple[str, str, str]:
+    """(한 번만 보여 줄 원문, DB 에 저장할 해시, 목록에 보여 줄 앞부분)"""
+    key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    return key, hash_api_key(key), key[: len(API_KEY_PREFIX) + 4]
+
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()

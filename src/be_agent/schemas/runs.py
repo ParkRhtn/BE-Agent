@@ -62,5 +62,6 @@ class UsageRead(BaseModel):
     unpriced_calls: int = 0
     by_model: list[UsageRow] = []
     by_source: list[UsageRow] = []  # 워크플로우·대화별
+    by_billing: list[UsageRow] = []  # 서버 키(크레딧 차감) / 내 API 키 / 개발용
     daily: list[UsageDay] = []
     error: str | None = None

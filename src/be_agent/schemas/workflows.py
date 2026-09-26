@@ -76,10 +76,18 @@ class WorkflowRead(BaseModel):
     name: str
     description: str | None
     graph: WorkflowGraph
+    published_graph: WorkflowGraph | None = Field(default=None, exclude=True)
+    published_at: datetime | None = None  # 없으면 배포 전 (외부 API·공개 링크로 실행할 수 없다)
     schedule: WorkflowSchedule | None = None
     delete_protected: bool = False
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def has_unpublished_changes(self) -> bool:
+        """배포한 뒤 편집본을 고쳤는지 (배포 전이면 False)"""
+        return self.published_graph is not None and self.published_graph != self.graph
 
     @field_validator("delete_protected", mode="before")
     @classmethod

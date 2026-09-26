@@ -29,7 +29,8 @@ src/be_agent/
 │   ├── llm.py           # 모델 팩토리 — 모델 생성은 반드시 여기를 거친다
 │   ├── fake_model.py    # 개발용 fake 모델
 │   ├── observability.py # Langfuse 콜백
-│   ├── usage.py         # 모델 호출마다 토큰·비용 기록, 사용량 집계
+│   ├── usage.py         # 모델 호출마다 토큰·비용·과금 주체 기록, 사용량 집계, 크레딧 차감
+│   ├── credits.py       # 크레딧 단위 변환, 잔액
 │   └── pricing.py       # 모델별 토큰 가격표 (비용 계산)
 ├── agent/
 │   ├── service.py       # 모델별 에이전트 그래프 캐시, 스레드 단위 실행
@@ -71,6 +72,13 @@ src/be_agent/
 | PATCH/DELETE | `/api/v1/providers/{id}` | 이름·키·주소 변경 (다시 확인), 쓸 모델 켜기/끄기 / 삭제 |
 | POST | `/api/v1/providers/{id}/verify` | 저장된 키로 다시 확인, 모델 목록 갱신 |
 | POST | `/api/v1/providers/{id}/test` | 모델에 짧은 요청을 실제로 보내 응답 확인 (토큰 몇 개 비용) |
+| GET/POST/DELETE | `/api/v1/api-keys` | 외부 API 키 목록 / 발급 (원문은 한 번만) / 폐기 |
+| POST/DELETE | `/api/v1/workflows/{id}/publish` | 배포 / 배포 내림 |
+| GET/PUT/DELETE | `/api/v1/workflows/{id}/embed` | 공개 링크(iframe) 조회 / 만들기·설정 / 없애기 |
+| POST | `/api/v1/ext/workflows/{id}/run` | (API 키) 배포본 실행. 결과 JSON, `stream: true` 면 SSE |
+| GET/POST | `/api/v1/public/embeds/{token}` · `/run` | (로그인 없이) 공개 링크 정보 / 실행 |
+| GET | `/api/v1/credits` | 내 크레딧 잔액과 충전·사용 내역 |
+| GET/POST | `/api/v1/admin/credits` | (관리자) 사용자 크레딧 조회 / 충전·조정 |
 
 ## 모델 설정
 
@@ -95,6 +103,46 @@ FE 의 **설정** 화면에서 Anthropic · OpenAI · OpenAI 호환 서버(Ollam
 - 에이전트 노드는 대화 이력을 남기지 않고 한 번 실행한다
 - 실행 이벤트: `run_start` · `node_start` · `node_delta`(LLM 스트리밍) · `node_finish` · `node_skip` · `node_error` · `run_finish`
 
+## 배포 (편집본 / 배포본)
+
+워크플로우 화면에서 저장한 것은 **편집본**이고, '배포'를 눌러야 **배포본**이 된다.
+외부 API·공개 링크는 배포본만 실행하므로, 운영 중인 연동을 두고 화면에서 마음껏 고쳐도 된다.
+화면 실행과 예약 실행은 편집본을 쓴다. 배포할 때 실행과 같은 검증을 한다.
+
+- `POST /api/v1/workflows/{id}/publish` 배포, `DELETE` 로 배포 내림 (외부 호출이 바로 거부됨)
+- `published_at`, `has_unpublished_changes` 로 상태를 보여 준다
+
+## 외부 API (간편 API)
+
+다른 서비스(내 서버, 앱, Zapier·n8n 등)에서 배포된 워크플로우를 실행한다. 설정 → API 키에서 키를 만들고,
+워크플로우 목록 카드 메뉴 → 'API로 호출'에서 curl·Python·JavaScript 예시를 복사한다.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ext/workflows/<ID>/run \
+  -H "Authorization: Bearer sk-be-..." -H "Content-Type: application/json" \
+  -d '{"input": "안녕하세요"}'
+# → {"run_id": "...", "status": "done", "output": "...", "error": null}
+```
+
+- `"stream": true` 면 노드별 이벤트를 SSE 로 받는다 (화면 실행과 같은 형식).
+- 실행 기록에는 `trigger: api` 로 남는다. 크레딧·사용량은 키 소유자 기준으로 똑같이 적용된다.
+- API 키는 `/api/v1/ext/*` 에서만 받는다. 키가 유출돼도 새 키 발급·제공사 키·계정 정보에는 접근할 수 없다.
+- 키는 해시만 저장하고 원문은 발급할 때 한 번만 보여 준다. 지우면 바로 거부된다.
+- 키 하나당 1분에 `EXT_RATE_LIMIT_PER_MINUTE`(기본 60)번. 서버 프로세스 메모리에서 세므로 여러 대로 늘리면 Redis 로 옮긴다.
+- 키마다 부를 수 있는 워크플로우를 고를 수 있다 (`workflow_ids`, 없으면 전부). 고객에게 넘길 키는 그 고객 것만.
+- 배포 전이면 409.
+
+## 공개 링크 (iframe)
+
+카드 메뉴 → '외부에서 쓰기' → '웹사이트에 붙이기'에서 링크를 만들면 `<iframe src=".../embed/<token>">` 코드를 준다.
+방문자는 로그인 없이 배포본을 실행하고, 비용은 링크를 만든 사람 크레딧·키로 나간다.
+
+- 허용 사이트(`allowed_origins`)를 적으면 그 사이트에서만 iframe 이 뜬다 (FE 가 `frame-ancestors` 로 막는다). 비우면 어디서나.
+- 링크마다 하루 실행 한도(한국 날짜)와 1분 한도(`EMBED_RATE_LIMIT_PER_MINUTE`, 기본 20).
+- 꺼져 있거나, 배포 전이거나, 없는 링크는 모두 404. 실패 원인은 방문자에게 보이지 않고 소유자 실행 기록에 남는다.
+- 실행 기록에는 `trigger: embed` 로 남는다.
+- FE 는 공개 링크 말고 모든 페이지에 `frame-ancestors 'self'` 를 붙여 다른 사이트 iframe 에 뜨지 않게 한다.
+
 ## 텔레그램 알림
 
 설정 화면에서 내 텔레그램 봇 토큰(@BotFather 에서 발급)을 넣으면, 봇에게 먼저 말을 건 내 채팅을 찾아 연결한다.
@@ -112,6 +160,20 @@ FE 의 **설정** 화면에서 Anthropic · OpenAI · OpenAI 호환 서버(Ollam
 모델을 부를 때마다 토큰 수를 `usage_records` 표에 남기고, `core/pricing.py` 의 가격표로 비용(USD)을 계산한다.
 `GET /api/v1/usage?days=7|30|90` 이 모델별·워크플로우/대화별·날짜별(한국 시간)로 모아 준다. Langfuse 없이도 동작한다.
 가격표에 없는 모델은 호출·토큰만 세고 비용은 "가격 정보 없음"으로 따로 센다. 새 모델을 쓰면 가격표에 한 줄 추가한다.
+호출마다 누구 키로 불렀는지(`billing`: 서버 키 / 내 API 키 / 개발용)도 남겨 `by_billing` 으로 나눠 보여 준다.
+
+## 크레딧
+
+서버 키(`.env` 의 `ANTHROPIC_API_KEY` 등) 모델은 운영자가 비용을 내므로 크레딧으로 과금한다.
+사용자가 설정 화면에서 등록한 자기 키의 모델은 비용이 사용자 계정에서 바로 나가므로 차감하지 않는다.
+
+- 차감: 대화·워크플로우 실행이 끝나면 서버 키로 부른 호출의 실측 원가 × `CREDITS_PER_USD` 를 한 번에 차감한다.
+  사용량 기록과 차감은 한 트랜잭션이라 기록만 남고 차감이 빠지는 일은 없다.
+- 차단 (`CREDITS_ENFORCED=true`): 잔액이 0 이하면 서버 키 모델 대화는 402, 워크플로우는 시작 전에 402.
+  사용자 키 모델은 계속 쓸 수 있다. 가격표에 없는 서버 키 모델은 원가를 알 수 없어 잔액과 무관하게 막는다.
+- 실행 도중에는 막지 않으므로 마지막 실행은 잔액을 넘어 음수가 될 수 있다 (그 다음 실행부터 막힘).
+- 충전: 결제 연동 전에는 관리자(`ADMIN_EMAILS`)가 `POST /api/v1/admin/credits {email, amount, note}` 로 넣는다. 음수는 회수.
+- 잔액은 `credit_transactions` 합계다. 기록은 고치지 않고 조정 기록을 추가한다.
 
 ## 추적 (Langfuse)
 

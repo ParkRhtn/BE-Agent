@@ -13,16 +13,24 @@ from be_agent.api.deps import (
     ModelRegistryDep,
     SessionDep,
     SessionMakerDep,
+    SettingsDep,
     TracingDep,
     ensure_model,
 )
 from be_agent.core.context import current_user_id
-from be_agent.core.model_registry import ModelNotAvailable
+from be_agent.core.model_registry import CreditsExhausted, ModelNotAvailable
 from be_agent.core.observability import Tracing
+from be_agent.core.security import as_utc
 from be_agent.core.usage import collect_usage, save_usage
 from be_agent.db.models import Agent, Run, Thread, User
 from be_agent.schemas.threads import ChatRequest, ThreadCreate, ThreadRead, ThreadUpdate, UIMessage
-from be_agent.streaming.ai_sdk import AI_SDK_HEADERS, encode_ai_sdk_stream, run_message_ids, to_ui_messages
+from be_agent.streaming.ai_sdk import (
+    AI_SDK_HEADERS,
+    USER_MESSAGE_PREFIX,
+    encode_ai_sdk_stream,
+    run_message_ids,
+    to_ui_messages,
+)
 from be_agent.streaming.background import stream_in_task
 
 router = APIRouter(prefix="/threads", tags=["threads"])
@@ -87,14 +95,23 @@ async def list_messages(
 ) -> list[dict]:
     await _get_thread_or_404(session, thread_id, user)
     messages = to_ui_messages(await agent.get_messages(thread_id))
-    # 답변마다 남긴 평가를 붙인다 (새로고침해도 누른 버튼이 보이게)
-    feedback = dict(
-        (await session.execute(select(Run.id, Run.feedback).where(Run.thread_id == thread_id))).tuples().all()
-    )
+    runs = {
+        run_id: (feedback, created_at)
+        for run_id, feedback, created_at in (
+            await session.execute(select(Run.id, Run.feedback, Run.created_at).where(Run.thread_id == thread_id))
+        ).tuples()
+    }
     for message in messages:
-        run_id = (message.get("metadata") or {}).get("runId")
-        if run_id and (value := feedback.get(run_id)) is not None:
-            message["metadata"]["feedback"] = value
+        metadata = message.setdefault("metadata", {})
+        # 질문은 메시지 ID 에, 답변은 메타데이터에 실행 ID 가 들어 있다
+        run_id = metadata.get("runId") or message["id"].removeprefix(USER_MESSAGE_PREFIX)
+        if run_id not in runs:
+            continue
+        feedback, created_at = runs[run_id]
+        metadata["createdAt"] = as_utc(created_at).isoformat()  # 화면에 보여 줄 시각
+        # 답변마다 남긴 평가를 붙인다 (새로고침해도 누른 버튼이 보이게)
+        if message["role"] == "assistant" and feedback is not None:
+            metadata["feedback"] = feedback
     return messages
 
 
@@ -111,9 +128,13 @@ async def chat(
     registry: ModelRegistryDep,
     tracing: TracingDep,
     sessionmaker: SessionMakerDep,
+    settings: SettingsDep,
     user: CurrentUserDep,
 ) -> StreamingResponse:
-    """메시지를 보내고 에이전트 응답을 SSE 로 스트리밍한다 (Vercel AI SDK useChat 호환)."""
+    """메시지를 보내고 에이전트 응답을 SSE 로 스트리밍한다 (Vercel AI SDK useChat 호환).
+
+    서버 키 모델인데 크레딧이 없으면 402. 사용자가 등록한 키의 모델은 크레딧과 무관하게 쓸 수 있다.
+    """
     thread = await _get_thread_or_404(session, thread_id, user)
     ensure_model(registry, body.model)
     agent_def = await session.get(Agent, thread.agent_id) if thread.agent_id else None
@@ -123,6 +144,8 @@ async def chat(
         else:
             # 예전에 쓰던 모델이 지금은 없으면(키 삭제 등) 기본 모델로 이어간다
             model_id, model_config = registry.resolve_or_default(thread.model or (agent_def and agent_def.model))
+    except CreditsExhausted as exc:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
     except ModelNotAvailable as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     spec = (
@@ -144,7 +167,8 @@ async def chat(
     user_message_id, answer_message_id = run_message_ids(run_id)
     name = f"대화: {agent_def.name}" if agent_def else "대화"
     tags = ["chat", *([f"agent:{agent_def.name}"] if agent_def else [])]
-    user_id, trace_id = user.id, run.trace_id
+    user_id, trace_id, credits_per_usd = user.id, run.trace_id, settings.credits_per_usd
+    created_at = as_utc(run.created_at).isoformat()
 
     async def traced() -> AsyncIterator[str]:
         current_user_id.set(user_id)  # 사용자별 설정이 필요한 도구(텔레그램 등)용
@@ -162,11 +186,20 @@ async def chat(
                         message_id=user_message_id,
                     )
                     async for chunk in encode_ai_sdk_stream(
-                        events, message_id=answer_message_id, metadata={"runId": run_id}
+                        events, message_id=answer_message_id, metadata={"runId": run_id, "createdAt": created_at}
                     ):
                         yield chunk
             finally:
                 # 중간에 멈춰도 이미 부른 모델 호출은 사용량에 남긴다
-                await asyncio.shield(save_usage(sessionmaker, usage, user_id=user_id, run_id=run_id, source=name))
+                await asyncio.shield(
+                    save_usage(
+                        sessionmaker,
+                        usage,
+                        user_id=user_id,
+                        run_id=run_id,
+                        source=name,
+                        credits_per_usd=credits_per_usd,
+                    )
+                )
 
     return StreamingResponse(stream_in_task(traced), media_type="text/event-stream", headers=AI_SDK_HEADERS)

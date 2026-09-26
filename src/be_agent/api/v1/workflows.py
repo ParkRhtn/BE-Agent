@@ -7,7 +7,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from be_agent.api.deps import CurrentUserDep, ModelRegistryDep, SessionDep, WorkflowRunnerDep
-from be_agent.db.models import Run, User, Workflow
+from be_agent.core.embeds import new_embed_token, today_runs
+from be_agent.db.models import Embed, Run, User, Workflow
+from be_agent.schemas.embeds import EmbedRead, EmbedUpdate
 from be_agent.schemas.runs import RunSummary
 from be_agent.schemas.workflows import (
     NodePosition,
@@ -20,7 +22,7 @@ from be_agent.schemas.workflows import (
     WorkflowUpdate,
 )
 from be_agent.streaming.background import stream_in_task
-from be_agent.workflow.runner import WorkflowInvalid
+from be_agent.workflow.runner import WorkflowCreditsExhausted, WorkflowInvalid
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -112,6 +114,8 @@ async def run_workflow(
         _, events = await runner.start(
             session, user=user, workflow=workflow, registry=registry, input=body.input, trigger="manual"
         )
+    except WorkflowCreditsExhausted as exc:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, exc.errors) from exc
     except WorkflowInvalid as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.errors) from exc
 
@@ -120,6 +124,71 @@ async def run_workflow(
             yield f"data: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
 
     return StreamingResponse(stream_in_task(sse), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@router.post(
+    "/{workflow_id}/publish",
+    response_model=WorkflowRead,
+    responses={400: {"description": "그래프 검증 실패. detail 에 오류 목록"}},
+)
+async def publish_workflow(
+    workflow_id: str, session: SessionDep, registry: ModelRegistryDep, runner: WorkflowRunnerDep, user: CurrentUserDep
+) -> Workflow:
+    """지금 저장된 편집본을 배포본으로. 외부 API·공개 링크는 배포본만 실행한다."""
+    workflow = await _get_workflow_or_404(session, workflow_id, user)
+    if errors := await runner.validate(session, user=user, graph=workflow.graph, registry=registry):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, errors)
+    workflow.published_graph = workflow.graph
+    workflow.published_at = datetime.now(UTC)
+    await session.commit()
+    return workflow
+
+
+@router.delete("/{workflow_id}/publish", response_model=WorkflowRead)
+async def unpublish_workflow(workflow_id: str, session: SessionDep, user: CurrentUserDep) -> Workflow:
+    """배포를 내린다. 외부 API·공개 링크 호출은 바로 거부된다."""
+    workflow = await _get_workflow_or_404(session, workflow_id, user)
+    workflow.published_graph = None
+    workflow.published_at = None
+    await session.commit()
+    return workflow
+
+
+async def _embed_read(session: SessionDep, embed: Embed) -> EmbedRead:
+    read = EmbedRead.model_validate(embed)
+    read.today_runs = await today_runs(session, embed)
+    return read
+
+
+@router.get("/{workflow_id}/embed", response_model=EmbedRead | None)
+async def get_embed(workflow_id: str, session: SessionDep, user: CurrentUserDep) -> EmbedRead | None:
+    """공개 링크 (iframe). 만든 적 없으면 null."""
+    await _get_workflow_or_404(session, workflow_id, user)
+    embed = await session.scalar(select(Embed).where(Embed.workflow_id == workflow_id))
+    return await _embed_read(session, embed) if embed else None
+
+
+@router.put("/{workflow_id}/embed", response_model=EmbedRead)
+async def upsert_embed(workflow_id: str, body: EmbedUpdate, session: SessionDep, user: CurrentUserDep) -> EmbedRead:
+    """공개 링크를 만들거나 설정을 바꾼다. 주소(token)는 처음 만들 때 한 번 정해진다."""
+    await _get_workflow_or_404(session, workflow_id, user)
+    embed = await session.scalar(select(Embed).where(Embed.workflow_id == workflow_id))
+    if embed is None:
+        embed = Embed(user_id=user.id, workflow_id=workflow_id, token=new_embed_token())
+        session.add(embed)
+    embed.enabled, embed.allowed_origins, embed.daily_limit = body.enabled, body.allowed_origins, body.daily_limit
+    await session.commit()
+    return await _embed_read(session, embed)
+
+
+@router.delete("/{workflow_id}/embed", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_embed(workflow_id: str, session: SessionDep, user: CurrentUserDep) -> None:
+    """공개 링크를 없앤다. 다시 만들면 주소가 바뀐다."""
+    await _get_workflow_or_404(session, workflow_id, user)
+    embed = await session.scalar(select(Embed).where(Embed.workflow_id == workflow_id))
+    if embed:
+        await session.delete(embed)
+        await session.commit()
 
 
 @router.get("/{workflow_id}/runs", response_model=list[RunSummary])

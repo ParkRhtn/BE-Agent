@@ -5,6 +5,7 @@ from sqlalchemy import func, select, update
 
 from be_agent.api.deps import CurrentUserDep, SessionDep, SettingsDep
 from be_agent.core.config import Settings
+from be_agent.core.credits import credits_to_milli
 from be_agent.core.mailer import send_email
 from be_agent.core.security import (
     as_utc,
@@ -14,7 +15,7 @@ from be_agent.core.security import (
     new_reset_token,
     verify_password,
 )
-from be_agent.db.models import Agent, PasswordResetToken, Thread, User
+from be_agent.db.models import Agent, CreditTransaction, PasswordResetToken, Thread, User
 from be_agent.schemas.auth import (
     Credentials,
     LoginRequest,
@@ -48,6 +49,15 @@ async def signup(body: Credentials, session: SessionDep, settings: SettingsDep) 
         # 인증 도입 전에 만든 데이터는 첫 사용자에게 귀속시킨다.
         for model in (Thread, Agent):
             await session.execute(update(model).where(model.user_id.is_(None)).values(user_id=user.id))
+    if settings.signup_credits > 0:
+        session.add(
+            CreditTransaction(
+                user_id=user.id,
+                kind="grant",
+                amount_milli=credits_to_milli(settings.signup_credits),
+                note="가입 체험 크레딧",
+            )
+        )
     await session.commit()
     return _issue_token(settings, user)
 

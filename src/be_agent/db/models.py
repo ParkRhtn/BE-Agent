@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Dialect, ForeignKey, String, Text, TypeDecorator
+from sqlalchemy import JSON, BigInteger, DateTime, Dialect, ForeignKey, String, Text, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -43,6 +43,22 @@ class User(Base):
     # 이 시각 이전에 발급된 JWT 는 거부한다 (비밀번호 변경 시 다른 세션 로그아웃).
     password_changed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     default_model: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+
+class ApiKey(Base):
+    """외부 서비스가 쓰는 API 키. 원문은 발급할 때 한 번만 보여 주고, DB 에는 해시만 저장한다."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    prefix: Mapped[str] = mapped_column(String(20))  # 목록에서 어떤 키인지 알아볼 앞부분 (sk-be-Ab12…)
+    # 이 키로 부를 수 있는 워크플로우. None 이면 전부 (고객에게 넘길 키는 그 고객 것만 고른다)
+    workflow_ids: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
@@ -98,13 +114,36 @@ class Workflow(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(String(500))
-    graph: Mapped[dict] = mapped_column(JSON)
+    graph: Mapped[dict] = mapped_column(JSON)  # 편집본 (화면에서 저장한 것)
+    # 배포본. 외부 API·공개 링크는 이것만 실행해서, 화면에서 고쳐도 운영 중인 연동이 바뀌지 않는다
+    published_graph: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # 예약 실행 {enabled, time: "HH:MM", weekdays: [0=월 … 6=일], input}. 한국 시간 기준
     schedule: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     # 마지막으로 예약 실행을 맡은 예정 시각. 같은 시각에 두 번 돌지 않게 한다
     schedule_last_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # 켜 두면 삭제 API 가 거부한다. 기존 DB 에 컬럼을 붙일 수 있게 nullable (None = 꺼짐)
     delete_protected: Mapped[bool | None] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
+
+
+class Embed(Base):
+    """공개 링크 (다른 웹사이트에 iframe 으로 붙이는 실행 화면). 로그인 없이 쓰이므로 권한이 가장 좁다:
+    이 워크플로우의 배포본 하나만 실행하고, 허용한 사이트에서만 뜨고, 하루 횟수가 정해져 있다."""
+
+    __tablename__ = "embeds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflows.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # 공개 주소 /embed/<token>
+    enabled: Mapped[bool] = mapped_column(default=True)
+    # iframe 을 띄울 수 있는 사이트 (https://example.com). 비어 있으면 어디서나
+    allowed_origins: Mapped[list[str]] = mapped_column(JSON, default=list)
+    daily_limit: Mapped[int] = mapped_column(default=100)  # 하루(한국 날짜) 실행 횟수
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
 
@@ -136,7 +175,7 @@ class Run(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))  # chat | workflow
-    trigger: Mapped[str | None] = mapped_column(String(20))  # manual | schedule (워크플로우)
+    trigger: Mapped[str | None] = mapped_column(String(20))  # manual | schedule | api | embed (워크플로우)
     thread_id: Mapped[str | None] = mapped_column(String(36), index=True)
     workflow_id: Mapped[str | None] = mapped_column(String(36), index=True)
     trace_id: Mapped[str] = mapped_column(String(32))
@@ -165,6 +204,25 @@ class UsageRecord(Base):
     input_tokens: Mapped[int] = mapped_column(default=0)
     output_tokens: Mapped[int] = mapped_column(default=0)
     cost: Mapped[float | None] = mapped_column()  # USD. 가격표에 없는 모델이면 None
+    # 누구 키로 불렀나: platform(서버 키, 크레딧 차감) | user(사용자가 등록한 키) | free(개발용)
+    # 이 기능 이전 기록은 None
+    billing: Mapped[str | None] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, index=True)
+
+
+class CreditTransaction(Base):
+    """크레딧 원장. 잔액은 항상 이 표의 합계다 (충전 +, 사용 -). 기록은 고치지 않고 조정 기록을 추가한다."""
+
+    __tablename__ = "credit_transactions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # grant(충전) | usage(사용) | adjust(관리자 조정)
+    # 1/1000 크레딧 단위 정수. 부동소수점 오차 없이 합계를 낸다.
+    amount_milli: Mapped[int] = mapped_column(BigInteger)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)  # usage 일 때 어느 실행의 비용인지
+    note: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[str | None] = mapped_column(String(36))  # 충전·조정한 관리자
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, index=True)
 
 

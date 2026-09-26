@@ -14,6 +14,7 @@ from be_agent.api.v1.router import api_router
 from be_agent.core.config import Settings, get_settings
 from be_agent.core.crypto import SecretBox
 from be_agent.core.observability import create_tracing
+from be_agent.core.rate_limit import RateLimiter
 from be_agent.core.usage import UsageCallback
 from be_agent.db.session import create_engine, create_sessionmaker, init_db
 from be_agent.tools import BASIC_TOOLS, load_mcp_tools
@@ -55,6 +56,8 @@ def create_app(settings: Settings | None = None, *, trace_exporter: Any = None) 
             ]
             tracing = create_tracing(settings, span_exporter=trace_exporter)
             app.state.tracing = tracing
+            app.state.ext_rate_limiter = RateLimiter(settings.ext_rate_limit_per_minute)
+            app.state.embed_rate_limiter = RateLimiter(settings.embed_rate_limit_per_minute)
             app.state.settings = settings
             app.state.sessionmaker = sessionmaker
             app.state.agent_service = AgentService(
@@ -64,8 +67,16 @@ def create_app(settings: Settings | None = None, *, trace_exporter: Any = None) 
                 callbacks=[*tracing.callbacks, UsageCallback()],
             )
             app.state.workflow_runner = WorkflowRunner(
-                service=app.state.agent_service, tracing=tracing, sessionmaker=app.state.sessionmaker
+                service=app.state.agent_service,
+                tracing=tracing,
+                sessionmaker=app.state.sessionmaker,
+                credits_per_usd=settings.credits_per_usd,
             )
+            if (settings.anthropic_api_key or settings.openai_api_key) and not settings.credits_enforced:
+                logger.warning(
+                    "서버 키가 설정돼 있지만 CREDITS_ENFORCED=false 입니다. "
+                    "가입한 누구나 운영자 비용으로 서버 키 모델을 한도 없이 쓸 수 있습니다."
+                )
             scheduler = WorkflowScheduler(app.state.sessionmaker, app.state.workflow_runner, settings)
             scheduler_task = asyncio.create_task(scheduler.run_forever()) if settings.scheduler_enabled else None
             logger.info("Started with default model %s and tools %s", settings.default_model, [t.name for t in tools])

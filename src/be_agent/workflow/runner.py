@@ -18,14 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from be_agent.agent.service import AgentService, AgentSpec
 from be_agent.core.context import current_user_id
-from be_agent.core.model_registry import ModelNotAvailable, ModelRegistry
+from be_agent.core.model_registry import CreditsExhausted, ModelNotAvailable, ModelRegistry
 from be_agent.core.observability import SpanHandle, SpanKind, Tracing
 from be_agent.core.usage import collect_usage, save_usage
 from be_agent.db.models import Agent, Run, User, Workflow
 from be_agent.schemas.workflows import WorkflowGraph
 from be_agent.workflow.engine import RunEvent, ValidationContext, WorkflowExecutor, validate_graph
 
-Trigger = Literal["manual", "schedule"]
+Trigger = Literal["manual", "schedule", "api", "embed"]
 
 # 노드 종류 → Langfuse 기록 종류
 _NODE_SPAN_KIND: dict[str, SpanKind] = {"agent": "agent", "tool": "tool"}
@@ -35,6 +35,16 @@ class WorkflowInvalid(Exception):
     def __init__(self, errors: list[str]) -> None:
         super().__init__("; ".join(errors))
         self.errors = errors
+
+
+class WorkflowNotPublished(Exception):
+    """외부 API·공개 링크는 배포본만 실행하는데, 아직 배포하지 않았다."""
+
+    message = "배포되지 않은 워크플로우입니다. 화면에서 '배포'를 누른 뒤 호출하세요."
+
+
+class WorkflowCreditsExhausted(WorkflowInvalid):
+    """워크플로우가 쓰는 서버 키 모델의 크레딧이 없다."""
 
 
 @dataclass
@@ -101,6 +111,36 @@ class WorkflowRunner:
     service: AgentService
     tracing: Tracing
     sessionmaker: async_sessionmaker
+    credits_per_usd: float = 500
+
+    async def validate(self, session: AsyncSession, *, user: User, graph: dict, registry: ModelRegistry) -> list[str]:
+        """실행하지 않고 검증만 (배포할 때). 크레딧 부족은 오류로 치지 않는다."""
+        *_, errors = await self._prepare(session, user=user, graph=graph, registry=registry)
+        return errors
+
+    async def _prepare(
+        self, session: AsyncSession, *, user: User, graph: dict, registry: ModelRegistry
+    ) -> tuple[WorkflowGraph, dict[str, AgentSpec], dict[str, str], list[str]]:
+        """(그래프, 쓸 수 있는 에이전트, 크레딧이 없어 못 쓰는 에이전트 → 이유, 검증 오류)"""
+        parsed = WorkflowGraph.model_validate(graph)
+        agents: dict[str, AgentSpec] = {}
+        blocked_agents: dict[str, str] = {}  # 크레딧이 없어 못 쓰는 에이전트 → 이유
+        for a in await session.scalars(select(Agent).where(Agent.user_id == user.id)):
+            try:
+                _, config = registry.resolve_or_default(a.model)
+            except CreditsExhausted as exc:
+                blocked_agents[a.id] = str(exc)
+                continue
+            except ModelNotAvailable:
+                continue  # 쓸 모델이 없는 에이전트는 검증에서 "에이전트를 선택하세요" 로 걸린다
+            agents[a.id] = AgentSpec(model=config, system_prompt=a.system_prompt, tools=tuple(a.tools))
+        ctx = ValidationContext(
+            tool_names={t.name for t in self.service.tools},
+            agent_ids=set(agents) | set(blocked_agents),
+            allowed_models=set(registry.configs),
+            has_default_model=registry.default_id is not None,
+        )
+        return parsed, agents, blocked_agents, validate_graph(parsed, ctx)
 
     async def start(
         self,
@@ -111,27 +151,22 @@ class WorkflowRunner:
         registry: ModelRegistry,
         input: str,
         trigger: Trigger,
+        published: bool = False,
     ) -> tuple[str, Callable[[], AsyncIterator[RunEvent]]]:
         """검증하고 실행 기록을 만든다. 돌려준 함수를 부르면 실행이 시작되어 이벤트가 나온다.
 
+        published=True 면 배포본을 실행한다 (외부 API·공개 링크). 배포본이 없으면 WorkflowNotPublished.
         검증에 실패하면 WorkflowInvalid.
         """
-        graph = WorkflowGraph.model_validate(workflow.graph)
-        agents: dict[str, AgentSpec] = {}
-        for a in await session.scalars(select(Agent).where(Agent.user_id == user.id)):
-            try:
-                _, config = registry.resolve_or_default(a.model)
-            except ModelNotAvailable:
-                continue  # 쓸 모델이 없는 에이전트는 검증에서 "에이전트를 선택하세요" 로 걸린다
-            agents[a.id] = AgentSpec(model=config, system_prompt=a.system_prompt, tools=tuple(a.tools))
-        ctx = ValidationContext(
-            tool_names={t.name for t in self.service.tools},
-            agent_ids=set(agents),
-            allowed_models=set(registry.configs),
-            has_default_model=registry.default_id is not None,
-        )
-        if errors := validate_graph(graph, ctx):
+        source = workflow.published_graph if published else workflow.graph
+        if source is None:
+            raise WorkflowNotPublished
+        graph, agents, blocked_agents, errors = await self._prepare(session, user=user, graph=source, registry=registry)
+        if errors:
             raise WorkflowInvalid(errors)
+        # 실행 도중 노드에서 실패하지 않도록, 크레딧이 필요한 노드가 있으면 시작 전에 막는다
+        if credit_errors := _credit_errors(graph, registry, blocked_agents):
+            raise WorkflowCreditsExhausted(credit_errors)
 
         executor = WorkflowExecutor(graph, _ServiceRuntime(self.service, registry, self.tracing), agents)
         run_id = uuid.uuid4().hex
@@ -195,7 +230,29 @@ class WorkflowRunner:
                     # 취소 중에도 저장은 끝까지 한다. 중간에 멈춰도 이미 부른 모델 호출은 사용량에 남긴다.
                     await asyncio.shield(save(record))
                     await asyncio.shield(
-                        save_usage(self.sessionmaker, usage, user_id=user_id, run_id=run_id, source=trace_name)
+                        save_usage(
+                            self.sessionmaker,
+                            usage,
+                            user_id=user_id,
+                            run_id=run_id,
+                            source=trace_name,
+                            credits_per_usd=self.credits_per_usd,
+                        )
                     )
 
         return run_id, events
+
+
+def _credit_errors(graph: WorkflowGraph, registry: ModelRegistry, blocked_agents: dict[str, str]) -> list[str]:
+    errors = []
+    for node in graph.nodes:
+        if node.type == "llm":
+            model = node.data.get("model")
+            reason = registry.blocked_reason(model if isinstance(model, str) and model else None)
+        elif node.type == "agent":
+            reason = blocked_agents.get(str(node.data.get("agent_id")))
+        else:
+            continue
+        if reason:
+            errors.append(f"[{node.id}] {reason}")
+    return errors

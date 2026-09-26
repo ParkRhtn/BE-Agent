@@ -67,7 +67,13 @@ def test_add_provider_enable_models_and_use_in_chat(
     models = client.get("/api/v1/models").json()
     model_id = f"{provider['id']}:claude-sonnet-5"
     assert models["default"] == model_id  # 직접 등록한 모델이 .env 대체 모델보다 우선
-    assert {"id": model_id, "label": "Claude Sonnet 5", "provider": "Anthropic"} in models["options"]
+    assert {
+        "id": model_id,
+        "label": "Claude Sonnet 5",
+        "provider": "Anthropic",
+        "billing": "user",  # 사용자 키는 크레딧을 차감하지 않는다
+        "blocked_reason": None,
+    } in models["options"]
 
     # 채팅은 복호화한 키로 모델을 만든다
     seen: list[ModelConfig] = []
@@ -81,7 +87,7 @@ def test_add_provider_enable_models_and_use_in_chat(
     thread = client.post("/api/v1/threads", json={}).json()
     events = parse_sse(client.post(f"/api/v1/threads/{thread['id']}/chat", json={"message": "hi"}).text)
     assert events[-1] == "[DONE]"
-    assert seen[0] == ModelConfig(provider="anthropic", model="claude-sonnet-5", api_key=GOOD_KEY)
+    assert seen[0] == ModelConfig(provider="anthropic", model="claude-sonnet-5", api_key=GOOD_KEY, billing="user")
     assert client.get(f"/api/v1/threads/{thread['id']}").json()["model"] == model_id
 
 

@@ -2,9 +2,11 @@
 
 - UsageCallback: 모든 모델 호출에 붙는 LangChain 콜백. 호출이 끝나면 토큰 수를 collect_usage 로 넘긴다.
 - collect_usage(): 대화 한 번·워크플로우 실행 한 번 동안 호출을 모은다. 끝나면 save_usage 로 저장한다.
+  서버 키(billing=platform)로 부른 호출의 원가는 같은 때에 크레딧에서 차감한다.
 - load_usage(): 사용량 화면용 집계.
 """
 
+import logging
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,8 +22,9 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from be_agent.core.credits import cost_to_milli
 from be_agent.core.pricing import cost_of
-from be_agent.db.models import UsageRecord
+from be_agent.db.models import CreditTransaction, UsageRecord
 from be_agent.schemas.runs import UsageDay, UsageRead, UsageRow
 
 
@@ -33,12 +36,15 @@ class ModelCall:
     cache_read: int = 0
     cache_write: int = 0  # 5분 캐시
     cache_write_1h: int = 0
+    billing: str | None = None  # platform | user | free (core.llm.Billing)
 
 
 @dataclass
 class UsageCollector:
     calls: list[ModelCall] = field(default_factory=list)
 
+
+logger = logging.getLogger(__name__)
 
 DAY_TZ = ZoneInfo("Asia/Seoul")  # 날짜별로 나눌 때 쓰는 시간대
 
@@ -61,7 +67,7 @@ class UsageCallback(BaseCallbackHandler):
     run_inline = True
 
     def __init__(self) -> None:
-        self._models: dict[UUID, str] = {}
+        self._models: dict[UUID, tuple[str, str | None]] = {}  # run_id → (모델, 과금 주체)
 
     def on_chat_model_start(
         self,
@@ -72,10 +78,12 @@ class UsageCallback(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **_: Any,
     ) -> None:
-        self._models[run_id] = (metadata or {}).get("ls_model_name") or ""
+        metadata = metadata or {}
+        # billing 은 create_chat_model 이 모델에 붙여 둔 값
+        self._models[run_id] = (metadata.get("ls_model_name") or "", metadata.get("billing"))
 
     def on_llm_end(self, response: LLMResult, *, run_id: UUID, **_: Any) -> None:
-        model = self._models.pop(run_id, "")
+        model, billing = self._models.pop(run_id, ("", None))
         collector = _current.get()
         if collector is None:
             return
@@ -97,11 +105,15 @@ class UsageCallback(BaseCallbackHandler):
                         cache_write=(details.get("cache_creation") or 0)
                         + (details.get("ephemeral_5m_input_tokens") or 0),
                         cache_write_1h=details.get("ephemeral_1h_input_tokens") or 0,
+                        billing=billing,
                     )
                 )
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **_: Any) -> None:
         self._models.pop(run_id, None)
+
+
+_BILLING_LABEL = {"platform": "서버 키 (크레딧 차감)", "user": "내 API 키", "free": "개발용 (무료)"}
 
 
 @dataclass
@@ -124,12 +136,36 @@ class _Sum:
 
 
 async def save_usage(
-    sessionmaker: async_sessionmaker, collector: UsageCollector, *, user_id: str, run_id: str, source: str
+    sessionmaker: async_sessionmaker,
+    collector: UsageCollector,
+    *,
+    user_id: str,
+    run_id: str,
+    source: str,
+    credits_per_usd: float,
 ) -> None:
+    """호출 기록과 크레딧 차감을 한 트랜잭션으로 저장한다 (기록만 남고 차감이 빠지는 일이 없게)."""
     if not collector.calls:
         return
+    platform_cost = 0.0
     async with sessionmaker() as db:
         for call in collector.calls:
+            cost = cost_of(
+                call.model,
+                input_tokens=call.input_tokens,
+                output_tokens=call.output_tokens,
+                cache_read=call.cache_read,
+                cache_write=call.cache_write,
+                cache_write_1h=call.cache_write_1h,
+            )
+            if call.billing == "platform":
+                if cost is None:
+                    # 가격표에 없는 서버 키 모델. CREDITS_ENFORCED 면 애초에 막히지만, 꺼져 있을 때를 위해 남긴다.
+                    logger.error(
+                        "서버 키로 부른 %s 의 가격을 몰라 크레딧을 차감하지 못했습니다 (run %s)", call.model, run_id
+                    )
+                else:
+                    platform_cost += cost
             db.add(
                 UsageRecord(
                     user_id=user_id,
@@ -138,15 +174,13 @@ async def save_usage(
                     model=call.model,
                     input_tokens=call.input_tokens,
                     output_tokens=call.output_tokens,
-                    cost=cost_of(
-                        call.model,
-                        input_tokens=call.input_tokens,
-                        output_tokens=call.output_tokens,
-                        cache_read=call.cache_read,
-                        cache_write=call.cache_write,
-                        cache_write_1h=call.cache_write_1h,
-                    ),
+                    cost=cost,
+                    billing=call.billing,
                 )
+            )
+        if (amount := cost_to_milli(platform_cost, credits_per_usd)) > 0:
+            db.add(
+                CreditTransaction(user_id=user_id, kind="usage", amount_milli=-amount, run_id=run_id, note=source[:200])
             )
         await db.commit()
 
@@ -163,9 +197,17 @@ async def load_usage(session: AsyncSession, *, user_id: str, days: int, now: dat
     total = _Sum()
     by_model: dict[str, _Sum] = defaultdict(_Sum)
     by_source: dict[str, _Sum] = defaultdict(_Sum)
+    by_billing: dict[str, _Sum] = defaultdict(_Sum)
     by_day: dict[date, _Sum] = defaultdict(_Sum)
     for r in records:
-        for bucket in (total, by_model[r.model], by_source[r.source], by_day[r.created_at.astimezone(DAY_TZ).date()]):
+        buckets = (
+            total,
+            by_model[r.model],
+            by_source[r.source],
+            by_billing[_BILLING_LABEL.get(r.billing or "", "구분 없음 (이전 기록)")],
+            by_day[r.created_at.astimezone(DAY_TZ).date()],
+        )
+        for bucket in buckets:
             bucket.add(r)
 
     def ranked(groups: dict[str, _Sum]) -> list[UsageRow]:
@@ -181,5 +223,6 @@ async def load_usage(session: AsyncSession, *, user_id: str, days: int, now: dat
         unpriced_calls=total.unpriced,
         by_model=ranked(by_model),
         by_source=ranked(by_source),
+        by_billing=ranked(by_billing),
         daily=[UsageDay(date=d.isoformat(), cost=by_day[d].cost, tokens=by_day[d].tokens) for d in days_list],
     )

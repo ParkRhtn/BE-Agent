@@ -9,6 +9,8 @@ from langchain_core.language_models import BaseChatModel
 from be_agent.core.fake_model import FakeToolChatModel
 
 ProviderKind = Literal["anthropic", "openai", "openai_compatible", "fake"]
+# 누구 키로 부르나. platform = 서버 키(.env, 운영자가 비용 부담 → 크레딧 차감), user = 사용자가 등록한 키, free = 개발용
+Billing = Literal["platform", "user", "free"]
 
 
 @dataclass(frozen=True)
@@ -19,11 +21,14 @@ class ModelConfig:
     model: str
     api_key: str | None = None
     base_url: str | None = None
+    billing: Billing = "platform"  # 모르면 차감 쪽으로 (운영자가 비용을 떠안지 않게)
 
 
 def create_chat_model(config: ModelConfig, **kwargs: Any) -> BaseChatModel:
+    # 모델 호출 콜백(UsageCallback)이 호출마다 과금 주체를 알 수 있게 모델에 붙여 둔다
+    kwargs["metadata"] = {**kwargs.get("metadata", {}), "billing": config.billing}
     if config.provider == "fake":
-        return FakeToolChatModel()
+        return FakeToolChatModel(metadata=kwargs["metadata"])
     # OpenAI 호환 서버(Ollama 등)는 openai 클라이언트에 주소만 바꿔 쓴다
     provider = "openai" if config.provider == "openai_compatible" else config.provider
     if config.api_key:
